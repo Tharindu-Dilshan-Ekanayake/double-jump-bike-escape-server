@@ -1,7 +1,9 @@
 import { Room, ServerError } from '@colyseus/core'
 
 import {
+  DOUBLE_PAD_WINS,
   MAX_PLAYERS_PER_LOBBY,
+  canUseDoublePad,
   SPEED_TICK_MS,
   padUnlocked,
   roundGain,
@@ -350,8 +352,8 @@ export class BikeRoom extends Room {
       client.send('result', { action: 'pad', ...fail('Too far from the pad') })
       return
     }
-    if (kind === 'double' && !player.pass2xWins) {
-      client.send('needPass', { product: 'pass2xWins' })
+    if (kind === 'double' && !canUseDoublePad(player)) {
+      client.send('result', { action: 'pad', ...fail(`Hold ${DOUBLE_PAD_WINS} Wins to use the 2x pad!`) })
       return
     }
     session.lastPadAt = now

@@ -366,8 +366,12 @@ export function speedBreakdown(player, { padMult = 1, others = 0 } = {}) {
 
 /** Wins from a stage pad: the aura multiplier, doubled on the purple pad with the 2x Wins pass. */
 export function winsMultiplier(player, { double = false } = {}) {
-  return (AURA_BY_ID[player.aura]?.winsMult ?? 1) * (double && player.pass2xWins ? 2 : 1)
+  return (AURA_BY_ID[player.aura]?.winsMult ?? 1) * (double && canUseDoublePad(player) ? 2 : 1)
 }
+
+/** Wins you need to be holding to use the purple 2x Wins pads (the 2x Wins pass skips this). */
+export const DOUBLE_PAD_WINS = 200
+export const canUseDoublePad = (player) => Boolean(player?.pass2xWins) || (player?.wins ?? 0) >= DOUBLE_PAD_WINS
 
 /** Rounds a gain to two decimals so "+1.25" style numbers stay tidy. */
 export const roundGain = (n) => Math.round(n * 100) / 100
