@@ -18,10 +18,13 @@ const check = (label, ok, detail = '') => {
 const old = { wins: 50, coins: 900, pets: 'dog,cat', owned: 'bike:angel', level: 7, totalSpeed: 300 }
 const { save: upgraded, from } = migrateSave(old)
 check('old save upgraded to the current version', from === 0 && upgraded.version === SAVE_VERSION)
-check('retired currencies and pets dropped', upgraded.coins === undefined && upgraded.pets === undefined)
+check('retired currencies and old pets dropped', upgraded.coins === undefined && upgraded.pets === '')
 check('free starter items added', upgraded.owned.includes('bike:starter') && upgraded.owned.includes('bike:angel'))
 check('progress kept', upgraded.wins === 50 && upgraded.totalSpeed === 300)
 check('new fields start fresh', upgraded.dailyStreak === 0 && upgraded.daily === '{}')
+check('v3 fields start fresh (new pets, spin, continues, star rewards)', upgraded.petsEquipped === '' && upgraded.spinSeconds === 0 && upgraded.continuesUsed === 0 && upgraded.starTiers === 0)
+const v2 = migrateSave({ version: 2, wins: 7, dailyStreak: 4 }).save
+check('a v2 save keeps its streak and gains the v3 fields', v2.version === SAVE_VERSION && v2.dailyStreak === 4 && v2.pets === '')
 
 // Damaged values are repaired, good ones untouched.
 const { save: repaired, fixed } = sanitizeSave({

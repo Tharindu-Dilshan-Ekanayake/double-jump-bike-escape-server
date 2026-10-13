@@ -106,11 +106,13 @@ export const BALANCE = {
    */
   rebirth: {
     firstSpeed: 160_000,
-    growth: 1.9,
+    growth: 2.0,
     perRebirth: 1,
     bonusPerRebirth: 0.5,
     /** Exclusive bikes given (and equipped) on reaching these rebirths. */
     milestones: { 5: 'reborn', 10: 'eclipse', 25: 'ascended' } as Record<number, string>,
+    /** Every rebirth also pays `wins` + `winsPerRebirth` x the new rebirth count. */
+    reward: { wins: 40, winsPerRebirth: 20 },
   },
 
   /** Bikes multiply Speed gain. Prices in Wins. */
@@ -134,6 +136,8 @@ export const BALANCE = {
     reborn: { mult: 22, price: 0 },
     eclipse: { mult: 100, price: 0 },
     ascended: { mult: 900, price: 0 },
+    // Star reward bike (not for sale; see starRewards).
+    star: { mult: 45, price: 0 },
     // World 2 bikes.
     crystal: { mult: 200, price: 60_000 },
     toxic: { mult: 300, price: 110_000 },
@@ -194,6 +198,8 @@ export const BALANCE = {
     gold: { bonus: 0.5, price: 12_000 },
     rainbow: { bonus: 0.65, price: 25_000 },
     cosmic: { bonus: 0.85, price: 60_000 },
+    // Star reward trail (not for sale).
+    star: { bonus: 0.2, price: 0 },
   },
 
   /** Auras multiply Wins from stage pads. 15 to collect. */
@@ -214,6 +220,8 @@ export const BALANCE = {
     rainbow: { winsMult: 3.5, price: 10_000 },
     crown: { winsMult: 4, price: 25_000 },
     unchained: { winsMult: 5, price: 75_000 },
+    // Star reward aura (not for sale).
+    star: { winsMult: 2.5, price: 0 },
   },
 
   /** Item Shop: permanent +Speed% each (bought again for more). */
@@ -291,6 +299,90 @@ export const BALANCE = {
    * `maxShareOfRebirth` of the next rebirth's Speed. Nothing under `minMinutes`.
    */
   offline: { minMinutes: 5, maxHours: 4, efficiency: 0.1, maxShareOfRebirth: 0.5 },
+
+  /**
+   * Rewards used by gifts and the spin wheel: `wins` grows by +`winsPerStage`
+   * per best stage reached; `trainMinutes` is that many minutes of Speed on
+   * your best treadmill (so it grows with you); `egg` is a free hatch of that egg.
+   */
+  rewardScale: { winsPerStage: 0.15 },
+
+  /** Playtime gifts in one session (they start over each time you join). */
+  playtimeGifts: [
+    { minutes: 5, wins: 15 },
+    { minutes: 10, trainMinutes: 2 },
+    { minutes: 15, wins: 35 },
+    { minutes: 25, egg: 'basic' },
+    { minutes: 40, trainMinutes: 4 },
+    { minutes: 60, wins: 120 },
+  ],
+
+  /** Lucky spin: one free spin per `everyMinutes` of playtime (counted online only). */
+  spin: {
+    everyMinutes: 10,
+    rewards: [
+      { weight: 30, wins: 15 },
+      { weight: 22, trainMinutes: 1 },
+      { weight: 18, wins: 40 },
+      { weight: 12, trainMinutes: 2 },
+      { weight: 9, egg: 'basic' },
+      { weight: 5, wins: 120 },
+      { weight: 3, egg: 'golden' },
+      { weight: 1, egg: 'cosmic' },
+    ],
+  },
+
+  /** "Continue from this island?" after a fall: free ones per day (UTC). */
+  continue: {
+    freePerDay: 1,
+    /** Accept continues paid for by a rewarded ad (off until ads are wired up). */
+    rewardedAds: false,
+  },
+
+  /**
+   * Pets: hatched from eggs bought with Wins. Up to `maxEquipped` follow your
+   * bike; each gives +`speed` (0.05 = +5% Speed) or x`wins` (stage Wins;
+   * Wins pets add up: x1.2 and x1.15 make x1.35).
+   * Egg `odds` are relative weights.
+   */
+  pets: {
+    maxEquipped: 3,
+    maxOwned: 60,
+    eggs: {
+      basic: { price: 150, odds: { puppy: 30, kitty: 30, bunny: 18, chick: 12, fox: 8, unicorn: 2 } },
+      golden: { price: 2_500, odds: { panda: 30, penguin: 28, tiger: 18, owl: 14, dragon: 8, phoenix: 2 } },
+      cosmic: { price: 35_000, odds: { alien: 30, robot: 28, ghost: 18, galaxycat: 14, whale: 8, cosmicdragon: 2 } },
+    },
+    species: {
+      puppy: { speed: 0.04 },
+      kitty: { speed: 0.04 },
+      bunny: { speed: 0.07 },
+      chick: { wins: 1.05 },
+      fox: { speed: 0.12 },
+      unicorn: { wins: 1.2 },
+      panda: { speed: 0.1 },
+      penguin: { wins: 1.1 },
+      tiger: { speed: 0.18 },
+      owl: { wins: 1.15 },
+      dragon: { speed: 0.32 },
+      phoenix: { wins: 1.4 },
+      alien: { speed: 0.25 },
+      robot: { wins: 1.2 },
+      ghost: { speed: 0.45 },
+      galaxycat: { wins: 1.35 },
+      whale: { speed: 0.8 },
+      cosmicdragon: { speed: 1.4 },
+    },
+  },
+
+  /** Star collection: total stars from stage records unlock these (once each). */
+  starRewards: [
+    { stars: 5, wins: 100 },
+    { stars: 15, trail: 'star' },
+    { stars: 30, bike: 'star' },
+    { stars: 45, aura: 'star' },
+    { stars: 66, wins: 25_000 },
+  ],
 
   /** Quest lines: each tier's target and reward grow by `growth` / `step`. */
   quests: {

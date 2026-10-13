@@ -491,6 +491,17 @@ export function starsFor(stage, ms) {
   return ratio <= BALANCE.records.twoStar ? 2 : 1
 }
 
+/** Total stars from a player's records `{ [gid]: ms }`, and the most there are. */
+export function starTotal(records) {
+  let total = 0
+  for (const stage of getLayout().stages) {
+    const ms = records?.[stage.gid]
+    if (ms) total += starsFor(stage, ms)
+  }
+  return total
+}
+export const starMax = () => getLayout().stages.length * 3
+
 /** The quickest time that's physically possible (the server's sanity check). */
 export const minRecordMs = (stage) => (recordDistance(stage) / PHYSICS.maxMoveSpeed) * 1000 * 0.9
 

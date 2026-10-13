@@ -6,8 +6,11 @@ Colyseus 0.18 server for the bike game in `../double-jump-bike-escape-client`.
   Colyseus locks a full room, so the 9th player's `joinOrCreate` opens a new
   lobby automatically. Lobbies are numbered "Lobby 1", "Lobby 2"…
 - **Server-authoritative economy.** Clients only send their position. The
-  server decides speed ticks, levels, wins, purchases, rebirths, quests
-  and codes, checking positions against the shared map (`src/shared/layout.js`).
+  server decides speed ticks, levels, wins, purchases, rebirths, quests,
+  codes, egg hatches, playtime gifts (timed from the join), lucky spins (the
+  slot is rolled here), continues (one free a day, only to an island reached
+  this run) and star rewards, checking positions against the shared map
+  (`src/shared/layout.js`).
 - **Persistence.** With `MONGODB_URI` (Bloxity Legion provides one) profiles
   and mailbox feedback live in MongoDB: a profile is loaded when its player
   joins and changes are written back every few seconds, so any server can pick
@@ -23,6 +26,7 @@ Colyseus 0.18 server for the bike game in `../double-jump-bike-escape-client`.
   the previous good copy as `players.json.bak` and reads it if the main file is
   ever damaged. Purchases, rebirths and rewards are saved within half a second.
   To change the format: bump `SAVE_VERSION` and add a `MIGRATIONS` step.
+  Version 3 added pets, the spin timer, the daily continue and star reward tiers.
 - **Graceful restarts.** On SIGTERM (a deploy or scale-down) the server stops
   taking riders and moves everyone to a fresh server: riders in a lobby right
   away, riders on the course once they're back in a lobby (at most 90 s, then
@@ -93,7 +97,8 @@ node scripts/lobby-test.js ws://host:port
 
 `npm run test:economy` checks the progression rules without a server: levels
 from Speed, rebirth targets and resets, tune-ups, the login streak, daily
-quests, milestone bikes and offline earnings. `npm run test:saves` checks the
+quests, milestone bikes, offline earnings, eggs and pets, playtime gifts, the
+lucky spin, continues, rebirth rewards and star rewards. `npm run test:saves` checks the
 save system: upgrading old saves, repairing bad values, leaving newer saves
 alone and recovering from a damaged file through its backup.
 

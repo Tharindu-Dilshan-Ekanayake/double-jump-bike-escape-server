@@ -14,7 +14,22 @@ import {
   TRAIN_PAD_BY_ID,
   TUNE_UP_MAX,
   REBIRTH_MILESTONES,
+  EGG_BY_ID,
+  EXCLUSIVE_SHOPS,
+  MAX_PETS_OWNED,
+  PET_BY_ID,
+  PLAYTIME_GIFTS,
+  SPIN_EVERY_MS,
+  SPIN_REWARDS,
+  STAR_REWARDS,
+  bestPets,
   bikeAvailable,
+  canEquipPets,
+  parseRecords,
+  rebirthRewardFor,
+  resolveReward,
+  rollPet,
+  rollSpin,
   dailyQuestProgress,
   dayNumber,
   offlineEarnings,
@@ -38,7 +53,7 @@ import {
   tuneUpCost,
   worldUnlocked,
 } from '../shared/gameData.js'
-import { getLayout } from '../shared/layout.js'
+import { getLayout, starTotal } from '../shared/layout.js'
 
 /**
  * Every server-side action that changes a player's stats.
@@ -121,8 +136,9 @@ export function buy(player, session, { cat, id } = {}) {
   if (COSMETICS[cat]) {
     const def = COSMETICS[cat][id]
     if (!def) return fail('Unknown item')
-    if (cat === 'bike' && def.shop === 'rebirth' && !owns(player, cat, id)) return fail(`Earned at Rebirth ${def.milestone}!`)
-    if (cat === 'bike' && def.shop !== 'rebirth' && !bikeAvailable(def, player)) return fail('Unlock World 2 first: escape World 1 and reach 10 rebirths!')
+    const exclusive = cat === 'bike' ? EXCLUSIVE_SHOPS.has(def.shop) && def.shop : def.exclusive
+    if (exclusive && !owns(player, cat, id)) return fail(exclusive === 'rebirth' ? `Earned at Rebirth ${def.milestone}!` : 'Earned with stars! See Star Rewards in Quests.')
+    if (cat === 'bike' && !exclusive && !bikeAvailable(def, player)) return fail('Unlock World 2 first: escape World 1 and reach 10 rebirths!')
     if (!owns(player, cat, id)) {
       const currency = def.currency || 'wins'
       if (!spend(player, currency, def.price)) return notEnough(currency)
@@ -230,6 +246,9 @@ export function rebirth(player) {
   player.rebirths += REBIRTH_GAIN
   player.totalSpeed = 0
   syncLevel(player)
+  // Every rebirth pays a little.
+  const wins = rebirthRewardFor(player.rebirths)
+  player.wins += wins
   // Milestone bikes: given, and ridden straight away if they're faster.
   const bikes = []
   for (const { at, bike } of REBIRTH_MILESTONES) {
@@ -248,6 +267,7 @@ export function rebirth(player) {
       bonusTo: rebirthBonus(player.rebirths),
       treadmills: preview.treadmills.map((pad) => ({ label: pad.label, mult: pad.mult, color: pad.color })),
       bikes,
+      wins,
     },
   }
 }
@@ -352,6 +372,120 @@ export function claimDailyQuest(player, session, index) {
   player.daily = JSON.stringify(daily)
   const levelUp = grant(player, quest.reward)
   return { ok: true, reward: quest.reward, levelUp, toast: describeReward(quest.reward) }
+}
+
+/* ---------------------------------------------------------------------------
+ * Pets
+ * ------------------------------------------------------------------------- */
+
+/** Hatches an egg (bought, or `free` from a gift or the spin). The pet is picked here. */
+export function hatchEgg(player, eggId, { free = false, roll = Math.random() } = {}) {
+  const egg = EGG_BY_ID[eggId]
+  if (!egg) return fail('Unknown egg')
+  const owned = parseList(player.pets)
+  if (owned.length >= MAX_PETS_OWNED) return fail(`You can keep ${MAX_PETS_OWNED} pets. Hatching is paused.`)
+  if (!free && !spend(player, 'wins', egg.price)) return notEnough('wins')
+  const pet = rollPet(eggId, roll)
+  const index = new Set(parseList(player.petIndex))
+  const isNew = !index.has(pet.id)
+  index.add(pet.id)
+  player.petIndex = [...index].join(',')
+  player.pets = [...owned, pet.id].join(',')
+  // A free slot is filled straight away.
+  const equipped = parseList(player.petsEquipped)
+  if (equipped.length < BALANCE.pets.maxEquipped) player.petsEquipped = [...equipped, pet.id].join(',')
+  return { ok: true, hatch: { egg: eggId, pet: pet.id, isNew }, toast: `${pet.name} hatched!` }
+}
+
+/** Sets the equipped pets (a list of species ids, repeats allowed if owned). */
+export function setPets(player, list) {
+  if (list === 'best') return setPets(player, bestPets(parseList(player.pets)))
+  const wanted = Array.isArray(list) ? list.filter((id) => typeof id === 'string' && PET_BY_ID[id]) : null
+  if (!wanted) return fail('Unknown pets')
+  if (!canEquipPets(parseList(player.pets), wanted)) return fail(`Up to ${BALANCE.pets.maxEquipped} pets you own`)
+  player.petsEquipped = wanted.join(',')
+  return { ok: true }
+}
+
+/** Lets one spare pet go (never one that's equipped), making room to hatch more. */
+export function releasePet(player, id) {
+  const owned = parseList(player.pets)
+  const equipped = parseList(player.petsEquipped)
+  const have = owned.filter((p) => p === id).length
+  if (!have) return fail("You don't have that pet")
+  if (have <= equipped.filter((p) => p === id).length) return fail('Unequip it first')
+  owned.splice(owned.indexOf(id), 1)
+  player.pets = owned.join(',')
+  return { ok: true, toast: `Released a ${PET_BY_ID[id]?.name ?? 'pet'} 👋` }
+}
+
+/* ---------------------------------------------------------------------------
+ * Playtime gifts, lucky spin, continues, star rewards
+ * ------------------------------------------------------------------------- */
+
+/** Gives a reward spec ({ wins | trainMinutes | egg }); eggs are hatched for free. */
+function giveSpec(player, spec) {
+  const reward = resolveReward(spec, player)
+  if (reward.egg) {
+    const hatched = hatchEgg(player, reward.egg, { free: true })
+    // Pets full: the egg turns into Wins instead.
+    if (!hatched.ok) return giveSpec(player, { wins: Math.round(EGG_BY_ID[reward.egg].price / 2) })
+    return { reward, hatch: hatched.hatch }
+  }
+  return { reward, levelUp: grant(player, reward) }
+}
+
+/** The next playtime gift of this session, once its minutes have passed. */
+export function claimGift(player, now = Date.now()) {
+  const gift = PLAYTIME_GIFTS[player.giftsClaimed]
+  if (!gift) return fail('All of today\'s session gifts are claimed!')
+  if (now - player.sessionStart < gift.minutes * 60_000) return fail('Not yet! Keep riding.')
+  player.giftsClaimed += 1
+  const given = giveSpec(player, gift)
+  return { ok: true, ...given, toast: `🎁 ${describeReward(given.reward)}` }
+}
+
+/** The lucky spin: ready every few minutes of playtime; the slot is picked here. */
+export function spinWheel(player, now = Date.now(), roll = Math.random()) {
+  if (now < player.spinReadyAt) return fail('The wheel is still recharging')
+  const slot = rollSpin(roll)
+  player.spinReadyAt = now + SPIN_EVERY_MS
+  const given = giveSpec(player, SPIN_REWARDS[slot])
+  return { ok: true, spin: slot, ...given, toast: `🎡 ${describeReward(given.reward)}` }
+}
+
+/**
+ * "Continue from this island?": free ones each day (rewarded ads only when
+ * enabled). `gid` must be an island this rider stood on during this run.
+ */
+export function useContinue(player, session, { gid, via = 'free' } = {}, now = Date.now()) {
+  const day = dayNumber(now)
+  if (player.continueDay !== day) {
+    player.continueDay = day
+    player.continuesUsed = 0
+  }
+  if (!session.runIslands?.has(gid)) return fail("You haven't reached that island this run")
+  if (via === 'ad') {
+    if (!BALANCE.continue.rewardedAds) return fail('Ads are not available yet')
+  } else {
+    if (player.continuesUsed >= BALANCE.continue.freePerDay) return fail('Your free continue for today is used up')
+    player.continuesUsed += 1
+  }
+  return { ok: true, continued: gid }
+}
+
+/** Gives any star rewards the player's records have reached. Returns what was given. */
+export function checkStarRewards(player) {
+  const total = starTotal(parseRecords(player.records))
+  const given = []
+  while (player.starTiers < STAR_REWARDS.length && total >= STAR_REWARDS[player.starTiers].stars) {
+    const tier = STAR_REWARDS[player.starTiers]
+    if (tier.wins) player.wins += tier.wins
+    for (const cat of ['trail', 'aura', 'bike']) if (tier[cat]) addOwned(player, cat, tier[cat])
+    given.push(tier)
+    player.starTiers += 1
+  }
+  return { total, given }
 }
 
 /* ---------------------------------------------------------------------------
