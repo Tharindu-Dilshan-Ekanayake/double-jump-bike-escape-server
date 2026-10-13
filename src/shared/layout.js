@@ -7,11 +7,12 @@
  *
  * Coordinates are studs, Y up. Each course runs from its lobby towards -Z. Stage 1
  * is level with the lobby; each later stage is a short island a little higher
- * than the one before, across a gap over a deadly pit. The gaps grow stage by
- * stage, and more levels mean more jumps (and a faster bike), so you fly
- * further. World 2 sits 3000 studs along +X.
+ * than the one before, across a gap over a deadly river. Each gap is built
+ * from its gate's Speed: more Speed means a faster bike and more jumps, so you
+ * fly further. World 2 sits 3000 studs along +X.
  */
-import { BIKES, PHYSICS, TRAIN_PADS, WORLDS, bikeSpeedFor, jumpsFor, mulberry32 } from './gameData.js'
+import { BALANCE } from '../../config/balance.ts'
+import { BIKES, PHYSICS, TRAIN_PADS, WORLDS, bikeSpeedFor, jumpsFor, levelForSpeed, mulberry32 } from './gameData.js'
 
 export { mulberry32 }
 
@@ -250,7 +251,8 @@ function addPortal(layout, box, to, title, color, x, z, zone) {
 function addBikeStand(layout, box, bikeId, x, z, style, zone) {
   layout.bikeStands.push({ bike: bikeId, x, z, style, world: zone / 100 })
   if (style === 'gallery') {
-    box(x - 5, x + 5, -0.5, 0.7, z - 5, z + 5, 'galleryPad', { zone })
+    // A round pedestal (drawn by the client); this keeps it solid to ride onto.
+    box(x - 4, x + 4, -0.5, 0.7, z - 4, z + 4, 'none', { visible: false, zone })
   } else {
     box(x - 4.5, x + 4.5, -1, 0.5, z - 4.5, z + 4.5, 'standPad', { zone })
   }
@@ -282,15 +284,15 @@ function buildTreadmills(layout, box, world, cols, rows, backX) {
  * ------------------------------------------------------------------------- */
 
 /**
- * The longest gap a rider at `level` clears by holding jump from the very edge:
- * every jump fires just before the top of the last one (the controller's
- * hold-to-jump rule), then the rider glides back down to plateau height.
- * Exact for the game's physics, so the server and client agree.
+ * The longest gap a rider with `totalSpeed` Speed clears by holding jump from
+ * the very edge: every jump fires just before the top of the last one (the
+ * controller's hold-to-jump rule), then the rider glides back down to plateau
+ * height. Exact for the game's physics, so the server and client agree.
  */
-export function gapReach(level, rise = 0, bikeUpgrades = 0) {
+export function gapReach(totalSpeed, rise = 0) {
   const { gravity: g, jumpVelocity: vj, maxMoveSpeed, maxFallSpeed } = PHYSICS
-  const speed = Math.min(bikeSpeedFor(level, bikeUpgrades), maxMoveSpeed)
-  const jumps = jumpsFor(level)
+  const speed = Math.min(bikeSpeedFor(totalSpeed), maxMoveSpeed)
+  const jumps = jumpsFor(levelForSpeed(totalSpeed))
   const fire = AUTO_JUMP_FIRE_SPEED
   const height = ((vj * vj - fire * fire) / (2 * g)) * (jumps - 1) + (vj * vj) / (2 * g)
   // Falling back down: free fall until terminal speed, then constant speed.
@@ -306,11 +308,14 @@ export function gapReach(level, rise = 0, bikeUpgrades = 0) {
 export const AUTO_JUMP_FIRE_SPEED = 2.5
 
 /**
- * Gap in front of a stage that needs `level`: comfortably inside what that level
- * reaches, clearly beyond the level below — so speed and jumps both matter.
+ * Gap in front of a stage whose gate asks for `speed`: inside what that Speed
+ * reaches, beyond what `1 - gates.tolerance` of it reaches. So the gate's Speed
+ * clears it and riders clearly below always fall short.
  */
-export const gapLengthFor = (level, rise = 0) =>
-  Math.round(gapReach(level - 1, rise) + 0.55 * (gapReach(level, rise) - gapReach(level - 1, rise)))
+export function gapLengthFor(speed, rise = 0) {
+  const short = gapReach(speed * (1 - BALANCE.gates.tolerance), rise)
+  return Math.round(short + 0.6 * (gapReach(speed, rise) - short))
+}
 
 function buildCourse(layout, box, world, info) {
   const ox = world.originX
@@ -333,7 +338,7 @@ function buildCourse(layout, box, world, info) {
     const rise = top - prevTop
     const pitY = prevTop - PIT_DEPTH
     const bottom = pitY - 10
-    const gap = gapLengthFor(def.jumps, rise)
+    const gap = gapLengthFor(def.speed, rise)
     const plateauLength = isFinish ? 70 : 40
     const zStart = prevEnd
     const wallZ = zStart - gap
@@ -346,7 +351,8 @@ function buildCourse(layout, box, world, info) {
       name: def.name,
       theme: def.theme,
       wins: def.wins,
-      jumps: def.jumps,
+      /** Total Speed the gate asks for. */
+      speed: def.speed,
       isFinish,
       originX: ox,
       /** Height of the deadly pit floor around and in front of the island. */
@@ -375,14 +381,14 @@ function buildCourse(layout, box, world, info) {
     // "Spam jump" sign on the island's front face, and the floating title.
     layout.signs.push({
       kind: 'jumpWall',
-      jumps: def.jumps,
+      speed: def.speed,
       gap: true,
       pos: [ox, pitY + PIT_DEPTH / 2, wallZ + 0.06],
       width: Math.min(34, W * 2 - 6),
       zone,
       starter: index === 1,
     })
-    layout.signs.push({ kind: 'stageTitle', text: def.name, theme: def.theme, pos: [ox, top + 15, wallZ - 6], zone })
+    layout.signs.push({ kind: 'stageTitle', text: def.name, speed: def.speed, theme: def.theme, pos: [ox, top + 16, wallZ - 6], zone })
 
     // Return (+wins, home) and 2x Wins pads right where you land.
     addWinPads(layout, box, stage, ox, top, wallZ - 11, zone)
@@ -444,8 +450,9 @@ export const FIRST_LASER_STAGE = 4
  * FIRST_LASER_STAGE on. The islands themselves stay clear.
  */
 function addGapLasers(layout, stage, world, rng) {
-  const { index, prevTop, zStart, gap, jumps } = stage
+  const { index, prevTop, zStart, gap } = stage
   if (index < FIRST_LASER_STAGE) return
+  const jumps = jumpsFor(levelForSpeed(stage.speed))
   const w2 = world.id === 2
   const count = w2 ? 2 + Math.floor(index / 4) : index < 5 ? 1 : index < 8 ? 2 : 3
   const reach = Math.min(Math.max(jumps * JUMP_RISE * 0.45, 10), 45)
@@ -466,6 +473,26 @@ function addGapLasers(layout, stage, world, rng) {
 }
 
 const round = (v) => Math.round(v * 100) / 100
+
+/* ---------------------------------------------------------------------------
+ * Stage records: time from leaving the lobby to landing on a stage
+ * ------------------------------------------------------------------------- */
+
+/** Studs ridden from the lobby's edge to landing on `stage`. */
+const recordDistance = (stage) => LOBBY_FRONT_Z - (stage.plateauZ0 - 1)
+
+/** Par (seconds): reaching `stage` riding flat out at its gate's top speed. */
+export const parTimeFor = (stage) => recordDistance(stage) / Math.min(bikeSpeedFor(stage.speed), PHYSICS.maxMoveSpeed)
+
+/** 1-3 stars for reaching `stage` in `ms` (thresholds in config/balance.ts). */
+export function starsFor(stage, ms) {
+  const ratio = ms / 1000 / parTimeFor(stage)
+  if (ratio <= BALANCE.records.threeStar) return 3
+  return ratio <= BALANCE.records.twoStar ? 2 : 1
+}
+
+/** The quickest time that's physically possible (the server's sanity check). */
+export const minRecordMs = (stage) => (recordDistance(stage) / PHYSICS.maxMoveSpeed) * 1000 * 0.9
 
 /* ---------------------------------------------------------------------------
  * Queries shared by client physics and server validation

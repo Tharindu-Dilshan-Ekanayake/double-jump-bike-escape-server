@@ -10,19 +10,24 @@ import {
   speedBreakdown,
   winsMultiplier,
 } from '../shared/gameData.js'
-import { getLayout, insideBox, stageAt, trainPadAt } from '../shared/layout.js'
+import { getLayout, insideBox, minRecordMs, stageAt, trainPadAt } from '../shared/layout.js'
 import {
   addSpeed,
+  applyOffline,
   bumpCounter,
   buy,
+  claimDailyQuest,
   claimQuest,
   claimTimed,
+  ensureDaily,
+  markDailyStage,
   equip,
   readJSON,
   rebirth,
   redeemCode,
+  syncLevel,
 } from '../game/economy.js'
-import { PERSISTED_FIELDS, leaderboards, loadProfile, recordFeedback, saveProfile } from '../store/profiles.js'
+import { PERSISTED_FIELDS, leaderboards, loadProfile, recordFeedback, saveProfile, saveSoon } from '../store/profiles.js'
 import { BikeState, PlayerState } from './schema.js'
 
 const layout = getLayout()
@@ -125,12 +130,14 @@ export class BikeRoom extends Room {
         maxPlayers: this.maxClients,
         roster: session.roster,
         isNew: session.isNew,
+        offline: session.offline,
       })
       client.send('leaderboards', leaderboards())
     })
     this.handle('move', this.onMove)
     this.handle('jump', this.onJump)
     this.handle('pad', this.onPad)
+    this.handle('record', this.onRecord)
     this.handle('chat', this.onChat)
     this.handle('feedback', this.onFeedback)
     this.handle('avatar', (client, player, _session, message) => {
@@ -140,6 +147,9 @@ export class BikeRoom extends Room {
     })
     this.handle('buy', (client, player, session, message) => {
       this.reply(client, buy(player, session, message), 'buy')
+    })
+    this.handle('dailyQuest', (client, player, session, message) => {
+      this.reply(client, claimDailyQuest(player, session, Number(message.index)), 'claim')
     })
     this.handle('equip', (client, player, _session, message) => {
       this.reply(client, equip(player, message), 'equip')
@@ -181,8 +191,15 @@ export class BikeRoom extends Room {
       toast: result.toast,
       reward: result.reward,
       rebirth: result.rebirth,
+      celebrate: result.celebrate,
+      streakDay: result.streakDay,
     })
     if (result.levelUp) client.send('levelup', result.levelUp)
+    // Spending, rebirths and rewards are saved straight away, not on the next timer.
+    if (result.ok) {
+      this.persist(client.sessionId)
+      saveSoon()
+    }
   }
 
   async onJoin(client, options = {}) {
@@ -205,6 +222,10 @@ export class BikeRoom extends Room {
         }
       }
     }
+    // Levels come from Speed; keeps older saves consistent with the current curve.
+    syncLevel(player)
+    // Offline earnings: the best treadmill kept training while you were away.
+    const offline = profile?.updatedAt ? applyOffline(player, Date.now() - profile.updatedAt) : null
     player.name = clean(options.name, 20) || profile?.name || 'Rider'
     if (typeof options.avatar === 'string' && options.avatar.length < 4000) player.avatar = options.avatar
     player.x = SPAWN.x + (Math.random() - 0.5) * 8
@@ -229,7 +250,9 @@ export class BikeRoom extends Room {
       jumpWindow: { start: 0, count: 0 },
       roster,
       isNew: !profile,
+      offline,
     })
+    ensureDaily(player, this.sessions.get(client.sessionId))
     activeByUid.set(uid, { room: this, client })
 
     this.broadcast('joined', { name: player.name }, { except: client })
@@ -293,20 +316,18 @@ export class BikeRoom extends Room {
           const gain = roundGain(speedBreakdown(player, { padMult, others }).total)
           const levelUp = addSpeed(player, gain)
           bumpCounter(player, session, 'gained', gain)
+          if (treadmill) bumpCounter(player, session, 'train', SPEED_TICK_MS / 1000)
           session.client.send('gain', { n: gain, pad: padMult })
           if (levelUp) session.client.send('levelup', levelUp)
         }
       }
 
       const stage = stageAt(layout, player.x, player.z)
-      if (
-        stage &&
-        stage.gid > player.bestStage &&
-        player.z <= stage.plateauZ0 - 2 &&
-        player.y >= stage.floorY - 0.5
-      ) {
-        player.bestStage = stage.gid
-      }
+      const onIsland = stage && player.z <= stage.plateauZ0 - 2 && player.y >= stage.floorY - 0.5
+      if (onIsland && stage.gid > player.bestStage) player.bestStage = stage.gid
+      if (onIsland) markDailyStage(player, session, stage.gid)
+      // New day while playing: fresh daily quests.
+      if (session.dailyDay !== Math.floor(now / 86_400_000)) ensureDaily(player, session, now)
     })
   }
 
@@ -362,6 +383,17 @@ export class BikeRoom extends Room {
     bumpCounter(player, session, 'wins', wins)
     if (stage > player.bestStage) player.bestStage = stage
     client.send('reward', { wins, stage, source: 'pad' })
+  }
+
+  /** A stage reached faster than ever: keep it if it's plausible and the rider is there. */
+  onRecord(_client, player, _session, { gid, ms }) {
+    const stage = layout.stages.find((s) => s.gid === gid)
+    if (!stage || !Number.isFinite(ms) || ms < minRecordMs(stage) || ms > 3_600_000) return
+    if (stageAt(layout, player.x, player.z)?.gid !== gid) return
+    const records = readJSON(player.records, {})
+    if (records[gid] && records[gid] <= ms) return
+    records[gid] = Math.round(ms)
+    player.records = JSON.stringify(records)
   }
 
   onFeedback(client, player, session, { text }) {

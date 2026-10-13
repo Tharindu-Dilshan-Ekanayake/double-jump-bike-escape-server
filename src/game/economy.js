@@ -1,3 +1,4 @@
+import { BALANCE } from '../../config/balance.ts'
 import {
   AURA_BY_ID,
   BIKE_BY_ID,
@@ -6,24 +7,38 @@ import {
   DAILY_COOLDOWN_MS,
   PRODUCTS,
   ITEM_BY_ID,
+  REBIRTH_GAIN,
   RESTOCK_WINS,
   QUESTS,
   TRAIL_BY_ID,
   TRAIN_PAD_BY_ID,
+  TUNE_UP_MAX,
+  REBIRTH_MILESTONES,
   bikeAvailable,
+  dailyQuestProgress,
+  dayNumber,
+  offlineEarnings,
+  parseDaily,
+  rebirthBonus,
+  rebirthPreview,
+  rollDailyQuests,
+  streakDayFor,
+  streakWinsFor,
   bikeSpeedFor,
-  bikeSpeedUpgradeCost,
   describeReward,
   formatNumber,
   jumpsFor,
+  levelForSpeed,
   parseList,
-  rebirthGainFor,
-  rebirthLevelFor,
+  rebirthSpeedFor,
   shopCycle,
   shopOffer,
+  speedForLevel,
+  tuneUpBonus,
+  tuneUpCost,
   worldUnlocked,
-  xpForLevel,
 } from '../shared/gameData.js'
+import { getLayout } from '../shared/layout.js'
 
 /**
  * Every server-side action that changes a player's stats.
@@ -45,23 +60,24 @@ export function readJSON(text, fallback) {
   }
 }
 
-/** Adds speed XP, rolling over as many levels as it pays for. */
+/** Sets level and the level bar (`xp`) from Total Speed; levels come from Speed. */
+export function syncLevel(player) {
+  player.level = levelForSpeed(player.totalSpeed)
+  player.xp = round2(Math.max(0, player.totalSpeed - speedForLevel(player.level)))
+}
+
+/** Adds Speed; returns the level-up details when it crosses one or more levels. */
 export function addSpeed(player, amount) {
   const from = player.level
+  const speedFrom = player.totalSpeed
   player.totalSpeed = round2(player.totalSpeed + amount)
-  player.xp = round2(player.xp + amount)
-  let guard = 0
-  while (player.xp >= xpForLevel(player.level) && guard < 1000) {
-    player.xp = round2(player.xp - xpForLevel(player.level))
-    player.level += 1
-    guard += 1
-  }
+  syncLevel(player)
   if (player.level === from) return null
   return {
     from,
     to: player.level,
-    bikeSpeedFrom: bikeSpeedFor(from, player.bikeUpg),
-    bikeSpeedTo: bikeSpeedFor(player.level, player.bikeUpg),
+    bikeSpeedFrom: Math.round(bikeSpeedFor(speedFrom)),
+    bikeSpeedTo: Math.round(bikeSpeedFor(player.totalSpeed)),
     jumpsFrom: jumpsFor(from),
     jumpsTo: jumpsFor(player.level),
   }
@@ -105,7 +121,8 @@ export function buy(player, session, { cat, id } = {}) {
   if (COSMETICS[cat]) {
     const def = COSMETICS[cat][id]
     if (!def) return fail('Unknown item')
-    if (cat === 'bike' && !bikeAvailable(def, player)) return fail('Unlock World 2 first: escape World 1 and reach 10 rebirths!')
+    if (cat === 'bike' && def.shop === 'rebirth' && !owns(player, cat, id)) return fail(`Earned at Rebirth ${def.milestone}!`)
+    if (cat === 'bike' && def.shop !== 'rebirth' && !bikeAvailable(def, player)) return fail('Unlock World 2 first: escape World 1 and reach 10 rebirths!')
     if (!owns(player, cat, id)) {
       const currency = def.currency || 'wins'
       if (!spend(player, currency, def.price)) return notEnough(currency)
@@ -149,10 +166,12 @@ export function buy(player, session, { cat, id } = {}) {
   }
 
   if (cat === 'bikeSpeed') {
-    const cost = bikeSpeedUpgradeCost(player.bikeUpg)
+    // Bike tune-ups: each one is a permanent Speed-gain bonus.
+    if (player.bikeUpg >= TUNE_UP_MAX) return fail('Your bike is fully tuned!')
+    const cost = tuneUpCost(player.bikeUpg)
     if (!spend(player, 'wins', cost)) return notEnough('wins')
     player.bikeUpg += 1
-    return { ok: true, toast: `Max Bike Speed ${bikeSpeedFor(player.level, player.bikeUpg)}!` }
+    return { ok: true, toast: `Tune-up ${player.bikeUpg}: +${Math.round(tuneUpBonus(player.bikeUpg) * 100)}% Speed!` }
   }
 
   return fail('Unknown purchase')
@@ -203,15 +222,34 @@ export function equip(player, { cat, id, action = 'equip' } = {}) {
  * Rebirth, rewards, quests, codes
  * ------------------------------------------------------------------------- */
 
+/** Rebirth: needs a Speed target, resets Speed (and level), gives a permanent bonus. */
 export function rebirth(player) {
-  const needed = rebirthLevelFor(player.rebirths)
-  if (player.level < needed) return fail(`Reach Level ${needed} to rebirth!`)
-  // The higher your level when you rebirth, the more rebirths you get.
-  const gained = rebirthGainFor(player.level)
-  player.rebirths += gained
-  player.level = 1
-  player.xp = 0
-  return { ok: true, toast: `+${formatNumber(gained)} Rebirths! (${formatNumber(player.rebirths)} total)`, rebirth: player.rebirths }
+  const needed = rebirthSpeedFor(player.rebirths)
+  if (player.totalSpeed < needed) return fail(`Reach ⚡${formatNumber(needed)} Speed to rebirth!`)
+  const preview = rebirthPreview(player)
+  player.rebirths += REBIRTH_GAIN
+  player.totalSpeed = 0
+  syncLevel(player)
+  // Milestone bikes: given, and ridden straight away if they're faster.
+  const bikes = []
+  for (const { at, bike } of REBIRTH_MILESTONES) {
+    if (player.rebirths < at || owns(player, 'bike', bike.id)) continue
+    addOwned(player, 'bike', bike.id)
+    bikes.push(bike.id)
+    if (bike.mult > (BIKE_BY_ID[player.bike]?.mult ?? 1)) player.bike = bike.id
+  }
+  return {
+    ok: true,
+    rebirth: player.rebirths,
+    toast: `Rebirth ${formatNumber(player.rebirths)}!`,
+    celebrate: {
+      rebirths: player.rebirths,
+      bonusFrom: preview.bonusFrom,
+      bonusTo: rebirthBonus(player.rebirths),
+      treadmills: preview.treadmills.map((pad) => ({ label: pad.label, mult: pad.mult, color: pad.color })),
+      bikes,
+    },
+  }
 }
 
 const TIMED = {
@@ -221,11 +259,23 @@ const TIMED = {
 
 function timedReward(what, player) {
   const stageScale = 1 + (player.bestStage || 0)
-  if (what === 'daily') return { wins: 20 + 5 * stageScale }
-  return { wins: 3 + 2 * stageScale }
+  const { base, perStage } = BALANCE.rewards[what === 'daily' ? 'daily' : 'chest']
+  return { wins: base + perStage * stageScale }
+}
+
+/** Daily login reward: the next day of the 7-day streak (a missed day starts it over). */
+export function claimDaily(player, now = Date.now()) {
+  if (now < player.dailyAt) return fail('Come back tomorrow for the next day!')
+  const day = streakDayFor(player, now)
+  const reward = { wins: streakWinsFor(day, player) }
+  player.dailyStreak = day
+  player.dailyAt = now + DAILY_COOLDOWN_MS
+  const levelUp = grant(player, reward)
+  return { ok: true, reward, levelUp, streakDay: day, toast: `Day ${day} reward: ${describeReward(reward)}` }
 }
 
 export function claimTimed(player, what, now = Date.now()) {
+  if (what === 'daily') return claimDaily(player, now)
   const def = TIMED[what]
   if (!def) return fail('Unknown reward')
   if (now < player[def.field]) return fail('Not ready yet!')
@@ -255,6 +305,65 @@ export function claimQuest(player, session, questId) {
   session.quests[quest.id] = { tier: entry.tier + 1, base: value }
   player.quests = JSON.stringify(session.quests)
   return { ok: true, reward, levelUp, toast: describeReward(reward) }
+}
+
+/* ---------------------------------------------------------------------------
+ * Daily quests
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Rolls today's quests if the day changed. Each counter quest remembers the
+ * counter's value now, so only today's progress counts. Returns true if rolled.
+ */
+export function ensureDaily(player, session, now = Date.now()) {
+  const day = dayNumber(now)
+  const daily = parseDaily(player.daily)
+  session.dailyDay = day
+  if (daily.day === day) {
+    session.dailyStage = daily.quests.find((q) => q.kind === 'stage' && !q.done)?.gid ?? 0
+    return false
+  }
+  const quests = rollDailyQuests(player, session.uid, day, getLayout().stages).map((quest) => {
+    const counter = { jumps: 'jumps', tricks: 'tricks', wins: 'wins', speed: 'gained', train: 'train' }[quest.kind]
+    return counter ? { ...quest, base: session.counters[counter] || 0 } : quest
+  })
+  player.daily = JSON.stringify({ day, quests })
+  session.dailyStage = quests.find((q) => q.kind === 'stage')?.gid ?? 0
+  return true
+}
+
+/** Marks today's "Finish a stage" quest done when the rider lands on that stage. */
+export function markDailyStage(player, session, gid) {
+  if (!session.dailyStage || session.dailyStage !== gid) return
+  const daily = parseDaily(player.daily)
+  const quest = daily.quests.find((q) => q.kind === 'stage' && q.gid === gid)
+  if (quest) quest.done = true
+  player.daily = JSON.stringify(daily)
+  session.dailyStage = 0
+}
+
+export function claimDailyQuest(player, session, index) {
+  const daily = parseDaily(player.daily)
+  const quest = daily.quests[index]
+  if (!quest || daily.day !== dayNumber()) return fail('That quest is gone. New ones arrived!')
+  if (quest.claimed) return fail('Already claimed!')
+  if (dailyQuestProgress(quest, session.counters) < quest.target) return fail('Keep going!')
+  quest.claimed = true
+  player.daily = JSON.stringify(daily)
+  const levelUp = grant(player, quest.reward)
+  return { ok: true, reward: quest.reward, levelUp, toast: describeReward(quest.reward) }
+}
+
+/* ---------------------------------------------------------------------------
+ * Offline earnings
+ * ------------------------------------------------------------------------- */
+
+/** Credits Speed earned while away; returns what was earned (or null). */
+export function applyOffline(player, awayMs) {
+  const earned = offlineEarnings(player, awayMs)
+  if (!earned) return null
+  addSpeed(player, earned.speed)
+  return earned
 }
 
 export function redeemCode(player, session, rawCode) {

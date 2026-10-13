@@ -45,10 +45,16 @@ export const PlayerState = schema(
     pass2xWins: t.boolean().default(false),
 
     dailyAt: t.number().default(0),
+    /** Days claimed in the current 7-day login streak. */
+    dailyStreak: t.uint16().default(0),
+    /** Today's daily quests `{ day, quests: [{ kind, target, base, reward, done, claimed }] }`. */
+    daily: t.string().default('{}'),
     chestAt: t.number().default(0),
     bestStage: t.uint8().default(0),
     /** `{ [questId]: { tier, base } }` */
     quests: t.string().default('{}'),
+    /** `{ [stage gid]: best ms }` from leaving the lobby to landing on the stage. */
+    records: t.string().default('{}'),
     /** `{ gained, wins, jumps, tricks }` lifetime counters that quests read. */
     counters: t.string().default('{}'),
   },
