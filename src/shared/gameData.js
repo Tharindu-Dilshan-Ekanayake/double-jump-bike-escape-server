@@ -196,6 +196,7 @@ export const BIKES = [
   { id: 'reborn', ...BALANCE.bikes.reborn, name: 'Reborn Bike', rarity: 'Epic', currency: 'wins', shop: 'rebirth', milestone: 5, frame: '#ff4f8b', accent: '#ffffff', rim: '#ffd23a', glow: true, extra: 'wings' },
   { id: 'eclipse', ...BALANCE.bikes.eclipse, name: 'Eclipse Bike', rarity: 'Legendary', currency: 'wins', shop: 'rebirth', milestone: 10, frame: '#1b1030', accent: '#ffb21f', rim: '#ff5a1f', glow: true, extra: 'crown' },
   { id: 'ascended', ...BALANCE.bikes.ascended, name: 'Ascended Bike', rarity: 'Mythic', currency: 'wins', shop: 'rebirth', milestone: 25, frame: '#fff6d6', accent: '#7ff3ff', rim: '#ffffff', metal: true, glow: true, extra: 'flamewings' },
+  { id: 'star', ...BALANCE.bikes.star, name: 'Star Bike', rarity: 'Legendary', currency: 'wins', shop: 'stars', frame: '#ffd23a', accent: '#ffffff', rim: '#fff3a0', metal: true, glow: true, extra: 'wings' },
   { id: 'crystal', ...BALANCE.bikes.crystal, name: 'Crystal Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#b07bff', accent: '#7ff3ff', rim: '#e3c9ff', glow: true, extra: 'crystals' },
   { id: 'toxic', ...BALANCE.bikes.toxic, name: 'Toxic Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#2b2f3a', accent: '#8cff3a', rim: '#8cff3a', glow: true, extra: 'fin' },
   { id: 'phoenix', ...BALANCE.bikes.phoenix, name: 'Phoenix Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#ff5a1f', accent: '#ffe14d', rim: '#ffb21f', glow: true, extra: 'flamewings' },
@@ -221,6 +222,7 @@ export const TRAILS = [
   { id: 'galaxy', ...BALANCE.trails.galaxy, name: 'Galaxy Dust', rarity: 'Epic', colors: ['#ff6ef7', '#7b3bff', '#2fd0ff'], glow: true },
   { id: 'gold', ...BALANCE.trails.gold, name: 'Golden Dust', rarity: 'Legendary', colors: ['#fff3a0', '#ffc933', '#ff9f1f'], glow: true },
   { id: 'rainbow', ...BALANCE.trails.rainbow, name: 'Rainbow Road', rarity: 'Legendary', colors: ['#ff3b3b', '#ffb03b', '#fff03b', '#3bff6e', '#3bb5ff', '#a03bff'], glow: true },
+  { id: 'star', ...BALANCE.trails.star, name: 'Star Trail', rarity: 'Legendary', exclusive: 'stars', colors: ['#ffffff', '#fff3a0', '#ffd23a', '#fff3a0'], glow: true },
   { id: 'cosmic', ...BALANCE.trails.cosmic, name: 'Cosmic Comet', rarity: 'Mythic', colors: ['#ffffff', '#ff6ef7', '#7b3bff', '#2fd0ff', '#ffffff'], glow: true },
 ]
 
@@ -241,6 +243,7 @@ export const AURAS = [
   { id: 'shadow', ...BALANCE.auras.shadow, name: 'Shadow Aura', rarity: 'Epic', currency: 'wins', color: '#9b5cff' },
   { id: 'rainbow', ...BALANCE.auras.rainbow, name: 'Rainbow Aura', rarity: 'Legendary', currency: 'wins', color: '#ff8ad8' },
   { id: 'crown', ...BALANCE.auras.crown, name: 'Royal Aura', rarity: 'Legendary', currency: 'wins', color: '#ffd23a' },
+  { id: 'star', ...BALANCE.auras.star, name: 'Star Aura', rarity: 'Legendary', exclusive: 'stars', currency: 'wins', color: '#ffe27a' },
   { id: 'unchained', ...BALANCE.auras.unchained, name: 'Unchained Aura', rarity: 'Mythic', currency: 'wins', color: '#ff2f4d' },
 ]
 
@@ -386,7 +389,7 @@ export function itemBonus(itemsCsv) {
   return parseList(itemsCsv).reduce((sum, id) => sum + (ITEM_BY_ID[id]?.bonus ?? 0), 0)
 }
 
-/** Collectibles: every trail and aura except "none". */
+/** Collectibles: every trail and aura except "none" (star exclusives included). */
 export const COLLECTIBLES = [...TRAILS.filter((t) => t.id !== 'none').map((t) => `trail:${t.id}`), ...AURAS.filter((a) => a.id !== 'none').map((a) => `aura:${a.id}`)]
 
 /** How many trails and auras a player has collected. */
@@ -426,13 +429,17 @@ export function padUnlocked(pad, player) {
   return (player.rebirths ?? 0) >= (pad.rebirths ?? 0)
 }
 
-/** Whether a bike can be bought (World 2 bikes need World 2 open; milestone bikes are never sold). */
-export const bikeAvailable = (bike, player) => bike.shop !== 'rebirth' && (bike.shop !== 'w2' || worldUnlocked(2, player))
+/** Bikes earned, never sold (rebirth milestones, star rewards). */
+export const EXCLUSIVE_SHOPS = new Set(['rebirth', 'stars'])
+
+/** Whether a bike can be bought (World 2 bikes need World 2 open; exclusives are never sold). */
+export const bikeAvailable = (bike, player) => !EXCLUSIVE_SHOPS.has(bike.shop) && (bike.shop !== 'w2' || worldUnlocked(2, player))
 
 /** Every multiplier that applies to one speed tick, split out for the UI. */
 export function speedBreakdown(player, { padMult = 1, others = 0 } = {}) {
   const bike = BIKE_BY_ID[player.bike]?.mult ?? 1
-  const extras = (TRAIL_BY_ID[player.trail]?.bonus ?? 0) + itemBonus(player.items) + tuneUpBonus(player.bikeUpg)
+  const pets = petBonus(player)
+  const extras = (TRAIL_BY_ID[player.trail]?.bonus ?? 0) + itemBonus(player.items) + tuneUpBonus(player.bikeUpg) + pets.speed
   const rebirth = 1 + rebirthBonus(player.rebirths ?? 0)
   const friends = 1 + friendBonus(others)
   const pass = player.pass2xSpeed ? 2 : 1
@@ -449,7 +456,7 @@ export function speedBreakdown(player, { padMult = 1, others = 0 } = {}) {
 
 /** Wins from a stage pad: the aura multiplier, doubled on the purple pad with the 2x Wins pass. */
 export function winsMultiplier(player, { double = false } = {}) {
-  return (AURA_BY_ID[player.aura]?.winsMult ?? 1) * (double && canUseDoublePad(player) ? 2 : 1)
+  return (AURA_BY_ID[player.aura]?.winsMult ?? 1) * petBonus(player).wins * (double && canUseDoublePad(player) ? 2 : 1)
 }
 
 /** Wins you need to be holding to use the purple 2x Wins pads (the 2x Wins pass skips this). */
@@ -669,5 +676,167 @@ export function describeReward(reward) {
   const parts = []
   if (reward.wins) parts.push(`+${formatNumber(reward.wins)} Wins`)
   if (reward.speed) parts.push(`+${formatNumber(reward.speed)} Speed`)
+  if (reward.egg) parts.push(`Free ${EGG_BY_ID[reward.egg]?.name ?? 'Egg'}`)
+  if (reward.trail) parts.push(TRAIL_BY_ID[reward.trail]?.name ?? 'Trail')
+  if (reward.aura) parts.push(AURA_BY_ID[reward.aura]?.name ?? 'Aura')
+  if (reward.bike) parts.push(BIKE_BY_ID[reward.bike]?.name ?? 'Bike')
   return parts.join('  ')
 }
+
+/* ---------------------------------------------------------------------------
+ * Pets and eggs
+ * ------------------------------------------------------------------------- */
+
+const P = BALANCE.pets
+export const MAX_PETS_EQUIPPED = P.maxEquipped
+export const MAX_PETS_OWNED = P.maxOwned
+
+/**
+ * Pet species: looks (built by game/rider/petModel.js) and an emoji for windows.
+ * `kind` picks the body plan; colours are body / belly / accent.
+ */
+export const PETS = [
+  { id: 'puppy', name: 'Puppy', egg: 'basic', rarity: 'Common', emoji: '🐶', kind: 'dog', colors: ['#c98a4b', '#f3d9b5', '#5a3a1e'] },
+  { id: 'kitty', name: 'Kitty', egg: 'basic', rarity: 'Common', emoji: '🐱', kind: 'cat', colors: ['#f2a65a', '#fff1dd', '#ff7a8a'] },
+  { id: 'bunny', name: 'Bunny', egg: 'basic', rarity: 'Uncommon', emoji: '🐰', kind: 'bunny', colors: ['#f4f4f8', '#ffd6e6', '#ff8fb8'] },
+  { id: 'chick', name: 'Chick', egg: 'basic', rarity: 'Uncommon', emoji: '🐤', kind: 'bird', colors: ['#ffe14d', '#fff6b0', '#ff9a1f'] },
+  { id: 'fox', name: 'Fox', egg: 'basic', rarity: 'Rare', emoji: '🦊', kind: 'fox', colors: ['#ff7a2f', '#ffffff', '#2b1d18'] },
+  { id: 'unicorn', name: 'Unicorn', egg: 'basic', rarity: 'Epic', emoji: '🦄', kind: 'unicorn', colors: ['#ffffff', '#ffd6f5', '#b45cff'], glow: true },
+  { id: 'panda', name: 'Panda', egg: 'golden', rarity: 'Uncommon', emoji: '🐼', kind: 'bear', colors: ['#ffffff', '#ffffff', '#1d1d24'] },
+  { id: 'penguin', name: 'Penguin', egg: 'golden', rarity: 'Uncommon', emoji: '🐧', kind: 'penguin', colors: ['#22263a', '#ffffff', '#ffb21f'] },
+  { id: 'tiger', name: 'Tiger', egg: 'golden', rarity: 'Rare', emoji: '🐯', kind: 'cat', colors: ['#ff9a1f', '#ffffff', '#1d1d24'], stripes: true },
+  { id: 'owl', name: 'Owl', egg: 'golden', rarity: 'Rare', emoji: '🦉', kind: 'owl', colors: ['#9a6a3e', '#f3d9b5', '#ffd23a'] },
+  { id: 'dragon', name: 'Dragon', egg: 'golden', rarity: 'Epic', emoji: '🐲', kind: 'dragon', colors: ['#3bd16b', '#c6ff7a', '#ff4f4f'], glow: true },
+  { id: 'phoenix', name: 'Phoenix', egg: 'golden', rarity: 'Legendary', emoji: '🔥', kind: 'phoenix', colors: ['#ff5a1f', '#ffd23a', '#fff3a0'], glow: true },
+  { id: 'alien', name: 'Alien', egg: 'cosmic', rarity: 'Rare', emoji: '👽', kind: 'alien', colors: ['#7dff8a', '#c6ffd0', '#1d1d24'] },
+  { id: 'robot', name: 'Robot', egg: 'cosmic', rarity: 'Rare', emoji: '🤖', kind: 'robot', colors: ['#b8c3d4', '#3dfffa', '#ff4f4f'] },
+  { id: 'ghost', name: 'Ghost', egg: 'cosmic', rarity: 'Epic', emoji: '👻', kind: 'ghost', colors: ['#f4f6ff', '#c9b6ff', '#1d1d24'], glow: true },
+  { id: 'galaxycat', name: 'Galaxy Cat', egg: 'cosmic', rarity: 'Epic', emoji: '🐈‍⬛', kind: 'cat', colors: ['#3b1d6e', '#b45cff', '#3dfffa'], glow: true },
+  { id: 'whale', name: 'Star Whale', egg: 'cosmic', rarity: 'Legendary', emoji: '🐋', kind: 'whale', colors: ['#2f8cff', '#bfe9ff', '#ffe27a'], glow: true },
+  { id: 'cosmicdragon', name: 'Cosmic Dragon', egg: 'cosmic', rarity: 'Mythic', emoji: '🐉', kind: 'dragon', colors: ['#7a2bff', '#ff6ef7', '#3dfffa'], glow: true },
+].map((pet) => ({ ...pet, ...P.species[pet.id] }))
+
+export const EGGS = [
+  { id: 'basic', name: 'Basic Egg', colors: ['#fff6dd', '#ffd9a0'], ...P.eggs.basic },
+  { id: 'golden', name: 'Golden Egg', colors: ['#fff3a0', '#ffb21f'], ...P.eggs.golden },
+  { id: 'cosmic', name: 'Cosmic Egg', colors: ['#b45cff', '#2f1f6e'], ...P.eggs.cosmic },
+]
+
+export const PET_BY_ID = Object.fromEntries(PETS.map((pet) => [pet.id, pet]))
+export const EGG_BY_ID = Object.fromEntries(EGGS.map((egg) => [egg.id, egg]))
+
+/** "+12% Speed" or "x1.3 Wins". */
+export const petBonusText = (pet) => (pet.speed ? `+${formatNumber(pet.speed * 100)}% Speed` : `x${formatNumber(pet.wins)} Wins`)
+
+/** Each egg's pets with their chance (0..1), rarest last. */
+export function eggOdds(eggId) {
+  const odds = EGG_BY_ID[eggId]?.odds ?? {}
+  const total = Object.values(odds).reduce((sum, w) => sum + w, 0)
+  return Object.entries(odds).map(([id, w]) => ({ pet: PET_BY_ID[id], chance: w / total }))
+}
+
+/** Picks a pet from an egg with `roll` in [0, 1). */
+export function rollPet(eggId, roll) {
+  let left = roll
+  for (const { pet, chance } of eggOdds(eggId)) {
+    if (left < chance) return pet
+    left -= chance
+  }
+  return eggOdds(eggId).at(-1).pet
+}
+
+/** Equipped pets' bonuses, added up: Speed % and Wins (x1.3 + x1.2 = x1.5). */
+export function petBonus(player) {
+  let speed = 0
+  let wins = 1
+  for (const id of parseList(player?.petsEquipped)) {
+    const pet = PET_BY_ID[id]
+    if (!pet) continue
+    if (pet.speed) speed += pet.speed
+    if (pet.wins) wins += pet.wins - 1
+  }
+  return { speed, wins }
+}
+
+/** Species a player has ever hatched (the Pet Index). */
+export const petIndex = (player) => new Set(parseList(player?.petIndex))
+
+/** Whether a list of equipped pets is possible with the pets owned. */
+export function canEquipPets(owned, equipped) {
+  if (equipped.length > MAX_PETS_EQUIPPED) return false
+  const counts = {}
+  for (const id of owned) counts[id] = (counts[id] || 0) + 1
+  for (const id of equipped) {
+    if (!counts[id]) return false
+    counts[id] -= 1
+  }
+  return true
+}
+
+/** The best pets to equip from those owned (highest bonus first). */
+export function bestPets(owned) {
+  const value = (id) => {
+    const pet = PET_BY_ID[id]
+    return pet ? (pet.speed ?? 0) * 1 + ((pet.wins ?? 1) - 1) * 0.8 : 0
+  }
+  return [...owned].sort((a, b) => value(b) - value(a)).slice(0, MAX_PETS_EQUIPPED)
+}
+
+/* ---------------------------------------------------------------------------
+ * Rewards from gifts and the spin wheel
+ * ------------------------------------------------------------------------- */
+
+/** Turns a reward spec ({ wins | trainMinutes | egg }) into what the player gets. */
+export function resolveReward(spec, player) {
+  if (spec.wins) return { wins: Math.round(spec.wins * (1 + BALANCE.rewardScale.winsPerStage * (player?.bestStage || 0))) }
+  if (spec.trainMinutes) {
+    const perSecond = speedPerSecond(player ?? {}, bestTreadmillFor(player ?? {}).mult)
+    return { speed: niceRound(Math.max(10, spec.trainMinutes * 60 * perSecond)) }
+  }
+  if (spec.egg) return { egg: spec.egg }
+  return {}
+}
+
+export const PLAYTIME_GIFTS = BALANCE.playtimeGifts
+/** Continues after a fall: `freePerDay`, and whether rewarded ads may pay for one. */
+export const CONTINUE_RULES = BALANCE.continue
+export const SPIN_REWARDS = BALANCE.spin.rewards
+export const SPIN_EVERY_MS = BALANCE.spin.everyMinutes * 60_000
+
+/** Picks a spin wheel slot with `roll` in [0, 1). */
+export function rollSpin(roll) {
+  const total = SPIN_REWARDS.reduce((sum, r) => sum + r.weight, 0)
+  let left = roll * total
+  for (let i = 0; i < SPIN_REWARDS.length; i += 1) {
+    if (left < SPIN_REWARDS[i].weight) return i
+    left -= SPIN_REWARDS[i].weight
+  }
+  return SPIN_REWARDS.length - 1
+}
+
+/** Wins for a rebirth (every one pays a little). */
+export const rebirthRewardFor = (rebirths) => BALANCE.rebirth.reward.wins + BALANCE.rebirth.reward.winsPerRebirth * rebirths
+
+/* ---------------------------------------------------------------------------
+ * Training time (for "you need X more Speed" messages)
+ * ------------------------------------------------------------------------- */
+
+/** Star collection rewards (thresholds and what each gives). */
+export const STAR_REWARDS = BALANCE.starRewards
+
+/** Stars that unlock a star-reward item (`cat` is trail, aura or bike), or null. */
+export const starsNeededFor = (cat, id) => STAR_REWARDS.find((tier) => tier[cat] === id)?.stars ?? null
+
+/**
+ * How long the best treadmill takes to earn `missing` Speed:
+ * `{ seconds, pad }` (seconds = 0 when nothing is missing).
+ */
+export function trainingEstimate(player, missing, others = 0) {
+  const pad = bestTreadmillFor(player)
+  if (missing <= 0) return { seconds: 0, pad }
+  return { seconds: missing / speedPerSecond(player, pad.mult, others), pad }
+}
+
+/** Speed per second on a treadmill multiplier `padMult`. */
+export const speedPerSecond = (player, padMult = 1, others = 0) =>
+  BALANCE.speed.perTick * speedBreakdown(player, { padMult, others }).total * (1000 / BALANCE.speed.tickMs)

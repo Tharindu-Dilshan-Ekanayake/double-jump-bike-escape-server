@@ -49,6 +49,21 @@ export const PlayerState = schema(
     dailyStreak: t.uint16().default(0),
     /** Today's daily quests `{ day, quests: [{ kind, target, base, reward, done, claimed }] }`. */
     daily: t.string().default('{}'),
+
+    /** Pets owned (species ids, repeats allowed), equipped (up to 3) and ever hatched. */
+    pets: t.string().default(''),
+    petsEquipped: t.string().default(''),
+    petIndex: t.string().default(''),
+    /** Server time this session started (playtime gifts) and gifts claimed in it. */
+    sessionStart: t.number().default(0),
+    giftsClaimed: t.uint8().default(0),
+    /** Server time the next free spin is ready (playtime-based). */
+    spinReadyAt: t.number().default(0),
+    /** Free continues: the day (UTC day number) and how many were used on it. */
+    continueDay: t.uint32().default(0),
+    continuesUsed: t.uint8().default(0),
+    /** Star collection rewards already given. */
+    starTiers: t.uint8().default(0),
     chestAt: t.number().default(0),
     bestStage: t.uint8().default(0),
     /** `{ [questId]: { tier, base } }` */

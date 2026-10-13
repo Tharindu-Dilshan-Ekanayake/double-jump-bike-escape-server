@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from 'node:fs'
  * To change the format: bump SAVE_VERSION and add MIGRATIONS[SAVE_VERSION].
  */
 
-export const SAVE_VERSION = 2
+export const SAVE_VERSION = 3
 
 const JSON_OBJECT = { type: 'json', fallback: '{}' }
 
@@ -39,6 +39,13 @@ export const FIELD_RULES = {
   dailyAt: { type: 'number', min: 0, max: 1e14, fallback: 0 },
   dailyStreak: { type: 'number', min: 0, max: 1_000, integer: true, fallback: 0 },
   daily: JSON_OBJECT,
+  pets: { type: 'string', max: 2_000, fallback: '' },
+  petsEquipped: { type: 'string', max: 200, fallback: '' },
+  petIndex: { type: 'string', max: 1_000, fallback: '' },
+  spinSeconds: { type: 'number', min: 0, max: 36_000, fallback: 0 },
+  continueDay: { type: 'number', min: 0, max: 1e7, integer: true, fallback: 0 },
+  continuesUsed: { type: 'number', min: 0, max: 255, integer: true, fallback: 0 },
+  starTiers: { type: 'number', min: 0, max: 255, integer: true, fallback: 0 },
   chestAt: { type: 'number', min: 0, max: 1e14, fallback: 0 },
   bestStage: { type: 'number', min: 0, max: 255, integer: true, fallback: 0 },
   quests: JSON_OBJECT,
@@ -66,6 +73,16 @@ export const MIGRATIONS = {
     save.dailyStreak = 0
     if (save.daily === undefined) save.daily = '{}'
     if (save.records === undefined) save.records = '{}'
+  },
+  // v3: pets (the new system), lucky spin progress, free continues, star rewards.
+  3: (save) => {
+    save.pets = ''
+    save.petsEquipped = ''
+    save.petIndex = ''
+    save.spinSeconds = 0
+    save.continueDay = 0
+    save.continuesUsed = 0
+    save.starTiers = 0
   },
 }
 

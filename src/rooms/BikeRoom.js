@@ -3,6 +3,7 @@ import { Room, ServerError } from '@colyseus/core'
 import {
   DOUBLE_PAD_WINS,
   MAX_PLAYERS_PER_LOBBY,
+  SPIN_EVERY_MS,
   canUseDoublePad,
   SPEED_TICK_MS,
   padUnlocked,
@@ -10,13 +11,20 @@ import {
   speedBreakdown,
   winsMultiplier,
 } from '../shared/gameData.js'
-import { getLayout, insideBox, minRecordMs, stageAt, trainPadAt } from '../shared/layout.js'
+import { LOBBY_FRONT_Z, getLayout, insideBox, minRecordMs, stageAt, trainPadAt } from '../shared/layout.js'
 import {
   addSpeed,
   applyOffline,
   bumpCounter,
   buy,
+  checkStarRewards,
   claimDailyQuest,
+  claimGift,
+  hatchEgg,
+  setPets,
+  releasePet,
+  spinWheel,
+  useContinue,
   claimQuest,
   claimTimed,
   ensureDaily,
@@ -131,6 +139,8 @@ export class BikeRoom extends Room {
         roster: session.roster,
         isNew: session.isNew,
         offline: session.offline,
+        // Lets the client line its countdowns up with the server clock.
+        serverTime: Date.now(),
       })
       client.send('leaderboards', leaderboards())
     })
@@ -151,6 +161,16 @@ export class BikeRoom extends Room {
     this.handle('dailyQuest', (client, player, session, message) => {
       this.reply(client, claimDailyQuest(player, session, Number(message.index)), 'claim')
     })
+    this.handle('gift', (client, player) => this.reply(client, claimGift(player), 'gift'))
+    this.handle('spin', (client, player) => this.reply(client, spinWheel(player), 'spin'))
+    this.handle('hatch', (client, player, _session, message) => this.reply(client, hatchEgg(player, String(message.egg)), 'hatch'))
+    this.handle('pets', (client, player, _session, message) => {
+      if (message.release) return this.reply(client, releasePet(player, String(message.release)), 'pets')
+      return this.reply(client, message.best ? setPets(player, 'best') : setPets(player, message.equip), 'pets')
+    })
+    this.handle('continue', (client, player, session, message) =>
+      this.reply(client, useContinue(player, session, { gid: Number(message.gid), via: message.via }), 'continue'),
+    )
     this.handle('equip', (client, player, _session, message) => {
       this.reply(client, equip(player, message), 'equip')
     })
@@ -193,6 +213,9 @@ export class BikeRoom extends Room {
       rebirth: result.rebirth,
       celebrate: result.celebrate,
       streakDay: result.streakDay,
+      hatch: result.hatch,
+      spin: result.spin,
+      continued: result.continued,
     })
     if (result.levelUp) client.send('levelup', result.levelUp)
     // Spending, rebirths and rewards are saved straight away, not on the next timer.
@@ -226,6 +249,11 @@ export class BikeRoom extends Room {
     syncLevel(player)
     // Offline earnings: the best treadmill kept training while you were away.
     const offline = profile?.updatedAt ? applyOffline(player, Date.now() - profile.updatedAt) : null
+    // Playtime gifts start over each session; the spin keeps its playtime progress.
+    const joinedAt = Date.now()
+    player.sessionStart = joinedAt
+    player.giftsClaimed = 0
+    player.spinReadyAt = joinedAt + Math.max(0, SPIN_EVERY_MS - (profile?.spinSeconds ?? 0) * 1000)
     player.name = clean(options.name, 20) || profile?.name || 'Rider'
     if (typeof options.avatar === 'string' && options.avatar.length < 4000) player.avatar = options.avatar
     player.x = SPAWN.x + (Math.random() - 0.5) * 8
@@ -251,6 +279,8 @@ export class BikeRoom extends Room {
       roster,
       isNew: !profile,
       offline,
+      /** Islands stood on since leaving the lobby (where a continue may resume). */
+      runIslands: new Set(),
     })
     ensureDaily(player, this.sessions.get(client.sessionId))
     activeByUid.set(uid, { room: this, client })
@@ -285,7 +315,9 @@ export class BikeRoom extends Room {
     // A newer window owns this profile now; don't overwrite its progress.
     const owner = activeByUid.get(session.uid)
     if (owner && owner.client !== session.client) return
-    saveProfile(session.uid, player, { codes: session.codes })
+    // Spin progress is playtime: save how much of the wait is already done.
+    const spinSeconds = Math.min(SPIN_EVERY_MS, Math.max(0, SPIN_EVERY_MS - (player.spinReadyAt - Date.now()))) / 1000
+    saveProfile(session.uid, player, { codes: session.codes, spinSeconds })
   }
 
   persistAll() {
@@ -326,6 +358,8 @@ export class BikeRoom extends Room {
       const onIsland = stage && player.z <= stage.plateauZ0 - 2 && player.y >= stage.floorY - 0.5
       if (onIsland && stage.gid > player.bestStage) player.bestStage = stage.gid
       if (onIsland) markDailyStage(player, session, stage.gid)
+      if (onIsland) session.runIslands.add(stage.gid)
+      else if (player.z > LOBBY_FRONT_Z) session.runIslands.clear()
       // New day while playing: fresh daily quests.
       if (session.dailyDay !== Math.floor(now / 86_400_000)) ensureDaily(player, session, now)
     })
@@ -394,6 +428,13 @@ export class BikeRoom extends Room {
     if (records[gid] && records[gid] <= ms) return
     records[gid] = Math.round(ms)
     player.records = JSON.stringify(records)
+    // New stars can unlock star rewards.
+    const stars = checkStarRewards(player)
+    if (stars.given.length) {
+      _client.send('starReward', { total: stars.total, given: stars.given })
+      this.persist(_client.sessionId)
+      saveSoon()
+    }
   }
 
   onFeedback(client, player, session, { text }) {
