@@ -1,7 +1,8 @@
 # Game server image for Bloxity Legion.
 # Listens on $PORT (Legion injects 2567), answers GET /health, runs as the
 # unprivileged "node" user and drains on SIGTERM (see src/server.js).
-FROM node:22-alpine
+# Node 24 runs config/balance.ts directly (type stripping).
+FROM node:24-alpine
 
 ENV NODE_ENV=production
 # Only used without MONGODB_URI (Legion always provides one); /tmp is writable.
@@ -11,6 +12,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
+COPY config ./config
 
 USER node
 EXPOSE 2567

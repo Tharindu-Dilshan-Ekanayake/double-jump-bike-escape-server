@@ -1,9 +1,10 @@
 /**
- * Copies the shared game rules from the client repo into `src/shared/`.
+ * Copies the shared game rules from the client repo into `src/shared/`, and the
+ * balance numbers (`config/balance.ts`) into `config/`.
  *
- * The client (`../double-jump-bike-escape-client/src/shared`) is the source of
- * truth; both sides must run identical rules or the server will reject claims the
- * client thinks are valid. Pass a different client path as the first argument.
+ * The client (`../double-jump-bike-escape-client`) is the source of truth; both
+ * sides must run identical rules or the server will reject claims the client
+ * thinks are valid. Pass a different client `src/shared` path as the first argument.
  */
 import { copyFileSync, mkdirSync, readdirSync } from 'node:fs'
 import path from 'node:path'
@@ -21,3 +22,10 @@ for (const file of readdirSync(source)) {
   copyFileSync(path.join(source, file), path.join(target, file))
   console.log(`synced ${file}`)
 }
+
+// The shared rules import ../../config/balance.ts, the same path on both sides.
+const balanceSource = path.resolve(source, '..', '..', 'config', 'balance.ts')
+const balanceTarget = path.join(here, '..', 'config', 'balance.ts')
+mkdirSync(path.dirname(balanceTarget), { recursive: true })
+copyFileSync(balanceSource, balanceTarget)
+console.log('synced config/balance.ts')

@@ -7,14 +7,16 @@
     "start": "node src/server.js",
     "dev": "nodemon --watch src src/server.js",
     "sync-shared": "node scripts/sync-shared.js",
-    "test:lobbies": "node scripts/lobby-test.js"
+    "test:lobbies": "node scripts/lobby-test.js",
+    "test:economy": "node scripts/economy-test.js",
+    "test:saves": "node scripts/save-test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18"
   },
   "dependencies": {
     "@colyseus/core": "^0.18.18",

@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { appendFile, rename, writeFile } from 'node:fs/promises'
+import { existsSync, mkdirSync } from 'node:fs'
+import { appendFile, copyFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+
+import { SAVE_VERSION, loadSave, readSaveFile } from './saveFormat.js'
 
 /**
  * Player profiles.
@@ -14,7 +16,13 @@ import path from 'node:path'
  *    batches every few seconds, and the leaderboards are a cached query.
  *  - A JSON file in DATA_DIR otherwise (local development): everything lives in
  *    memory and is flushed to disk every few seconds (write-to-temp + rename, so
- *    a crash never leaves a half-written file).
+ *    a crash never leaves a half-written file; the previous file is kept as
+ *    players.json.bak and read if the main one is ever damaged).
+ *
+ * Every save is versioned, upgraded and checked on load (see saveFormat.js). A
+ * save from a newer server version is never overwritten, and in MongoDB the
+ * write itself refuses to replace a newer-version save (a draining old pod
+ * can't clobber what a new one wrote).
  */
 
 const DATA_DIR = process.env.DATA_DIR || path.resolve('data')
@@ -42,10 +50,13 @@ export const PERSISTED_FIELDS = [
   'pass2xSpeed',
   'pass2xWins',
   'dailyAt',
+  'dailyStreak',
+  'daily',
   'chestAt',
   'bestStage',
   'quests',
   'counters',
+  'records',
 ]
 
 const LEADERBOARD_STATS = ['totalSpeed', 'wins', 'rebirths', 'level']
@@ -59,6 +70,10 @@ let database = null
 let collection = null
 let mongoClient = null
 let cachedBoards = emptyBoards()
+
+/** Saves from a newer server version: loaded, never written back. */
+const readOnly = new Set()
+let flushSoon = null
 
 /** Smoke-test bots (scripts/lobby-test.js) play with `test:` uids and are never saved. */
 const isTestUid = (uid) => uid.startsWith('test:')
@@ -86,17 +101,22 @@ export async function initProfiles() {
 }
 
 function loadFile() {
-  if (!existsSync(FILE)) return
-  try {
-    const raw = JSON.parse(readFileSync(FILE, 'utf8'))
-    for (const [uid, profile] of Object.entries(raw)) {
-      if (isTestUid(uid)) dirty.add(uid)
-      else profiles.set(uid, profile)
-    }
-    console.log(`[profiles] loaded ${profiles.size} profiles from ${FILE}`)
-  } catch (err) {
-    console.error(`[profiles] could not read ${FILE}; starting empty`, err)
+  if (!existsSync(FILE) && !existsSync(`${FILE}.bak`)) return
+  const { data, source } = readSaveFile(FILE)
+  if (!data) {
+    console.error(`[profiles] no readable save file in ${DATA_DIR}; starting empty (the damaged files are left in place)`)
+    return
   }
+  for (const [uid, raw] of Object.entries(data)) {
+    if (isTestUid(uid)) {
+      dirty.add(uid)
+      continue
+    }
+    const { save, readOnly: newer } = loadSave(raw, uid)
+    if (newer) readOnly.add(uid)
+    profiles.set(uid, save)
+  }
+  console.log(`[profiles] loaded ${profiles.size} profiles from ${source === 'backup' ? `${FILE}.bak (the main file was damaged)` : FILE}`)
 }
 
 /** The stored profile, or null for a first-time player. */
@@ -106,19 +126,32 @@ export async function loadProfile(uid) {
   if (!collection || dirty.has(uid)) return profiles.get(uid) || null
   const doc = await collection.findOne({ _id: uid })
   if (!doc) return null
-  const { _id: _ignored, ...profile } = doc
-  profiles.set(uid, profile)
-  return profile
+  const { _id: _ignored, ...raw } = doc
+  const { save, readOnly: newer } = loadSave(raw, uid)
+  if (newer) readOnly.add(uid)
+  else readOnly.delete(uid)
+  profiles.set(uid, save)
+  return save
 }
 
 /** Copies the persisted fields of `state` (a PlayerState or plain object). */
 export function saveProfile(uid, state, extra = {}) {
-  if (isTestUid(uid)) return
+  if (isTestUid(uid) || readOnly.has(uid)) return
   const previous = profiles.get(uid) || {}
-  const next = { ...previous, ...extra, updatedAt: Date.now() }
+  const next = { ...previous, ...extra, version: SAVE_VERSION, updatedAt: Date.now() }
   for (const field of PERSISTED_FIELDS) next[field] = state[field]
   profiles.set(uid, next)
   dirty.add(uid)
+}
+
+/** Writes changes out shortly (after rebirths, purchases and claims) instead of waiting for the timer. */
+export function saveSoon() {
+  if (flushSoon) return
+  flushSoon = setTimeout(() => {
+    flushSoon = null
+    flushProfiles()
+  }, 500)
+  flushSoon.unref?.()
 }
 
 /** Writes every changed profile out (to MongoDB or the JSON file). */
@@ -130,14 +163,33 @@ export async function flushProfiles() {
   flushing = (async () => {
     try {
       if (collection) {
+        // Only replace saves at this version or older: a newer server's save wins.
+        const notNewer = { $or: [{ version: { $exists: false } }, { version: { $lte: SAVE_VERSION } }] }
         const ops = uids
-          .filter((uid) => profiles.has(uid))
-          .map((uid) => ({ updateOne: { filter: { _id: uid }, update: { $set: profiles.get(uid) }, upsert: true } }))
-        if (ops.length) await collection.bulkWrite(ops, { ordered: false })
+          .filter((uid) => profiles.has(uid) && !readOnly.has(uid))
+          .map((uid) => ({ updateOne: { filter: { _id: uid, ...notNewer }, update: { $set: profiles.get(uid) }, upsert: true } }))
+        if (ops.length) {
+          try {
+            await collection.bulkWrite(ops, { ordered: false })
+          } catch (err) {
+            // A newer save already exists for these players: the upsert hit its
+            // _id. That's the guard working, not a failure.
+            const writeErrors = err.writeErrors ?? []
+            const blocked = writeErrors.filter((e) => e.code === 11000)
+            for (const e of blocked) {
+              const uid = ops[e.index]?.updateOne.filter._id
+              if (uid) readOnly.add(uid)
+              console.warn(`[saves] ${uid} has a newer save; not overwritten`)
+            }
+            if (!writeErrors.length || blocked.length < writeErrors.length) throw err
+          }
+        }
       } else {
         mkdirSync(DATA_DIR, { recursive: true })
         const tmp = `${FILE}.tmp`
         await writeFile(tmp, JSON.stringify(Object.fromEntries(profiles)))
+        // Keep the last good file as a backup, then swap the new one in.
+        if (existsSync(FILE)) await copyFile(FILE, `${FILE}.bak`)
         await rename(tmp, FILE)
       }
     } catch (err) {

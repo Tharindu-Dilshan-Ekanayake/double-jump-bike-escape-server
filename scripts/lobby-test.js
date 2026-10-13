@@ -96,15 +96,14 @@ bot.send('buy', { cat: 'item', id: notOnSale.id })
 await wait(200)
 check('items not on sale are refused', !me().items.split(',').includes(notOnSale.id))
 
-// Rebirth: get to level 14+ with speed packs, then rebirth for more than one at once.
+// Rebirth needs its Speed target (scripts/economy-test.js covers a real rebirth).
 const spawn = layout.worlds[0].spawn
 bot.send('move', { x: spawn.x, y: spawn.y, z: spawn.z, r: 0, s: 0, a: 0 })
-bot.send('buy', { cat: 'product', id: 'speed10k' })
-await wait(600)
-const levelBefore = me().level
+const rebirthsBefore = me().rebirths
+const speedBefore2 = me().totalSpeed
 bot.send('rebirth', {})
 await wait(250)
-check('rebirth grants bulk rebirths', me().rebirths > 1 && me().level === 1, `level ${levelBefore} -> ${me().rebirths} rebirths`)
+check('rebirth is refused below its Speed target', me().rebirths === rebirthsBefore && me().totalSpeed >= speedBefore2, `speed ${me().totalSpeed}`)
 
 // World 2 bikes stay locked until World 2 is unlocked (escape World 1 + 10 rebirths).
 bot.send('buy', { cat: 'bike', id: 'crystal' })

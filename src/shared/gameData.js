@@ -4,8 +4,11 @@
  * The server repo keeps an identical copy in `src/shared/` — after editing anything
  * in this folder run `npm run sync-shared` in the server repo. Everything that
  * decides a reward (prices, multipliers, pad positions) lives here so both sides
- * always agree.
+ * always agree. The numbers themselves (gates, prices, multipliers, rewards) live
+ * in config/balance.ts.
  */
+
+import { BALANCE } from '../../config/balance.ts'
 
 export const GAME_TITLE = '+1 Double Jump Bike Escape'
 export const ROOM_NAME = 'bike_escape'
@@ -25,11 +28,11 @@ export const PHYSICS = Object.freeze({
 })
 
 /** Server awards "+speed" at most this often while a player keeps moving. */
-export const SPEED_TICK_MS = 400
-export const DAILY_COOLDOWN_MS = 24 * 60 * 60_000
-export const CHEST_COOLDOWN_MS = 15 * 60_000
+export const SPEED_TICK_MS = BALANCE.speed.tickMs
+export const DAILY_COOLDOWN_MS = BALANCE.rewards.daily.cooldownMinutes * 60_000
+export const CHEST_COOLDOWN_MS = BALANCE.rewards.chest.cooldownMinutes * 60_000
 export const ITEM_RESTOCK_MS = 5 * 60_000
-export const RESTOCK_WINS = 25
+export const RESTOCK_WINS = BALANCE.restockWins
 export const SHOP_SLOTS = 4
 
 /** Small seeded PRNG so every client and the server generate the same things. */
@@ -48,67 +51,87 @@ export function mulberry32(seed) {
  * Progression formulas
  * ------------------------------------------------------------------------- */
 
-/** Speed XP needed to finish `level` (Lvl 10 -> 283, Lvl 11 -> 410). */
-export function xpForLevel(level) {
-  if (level <= 12) return Math.floor(10 * 1.45 ** (level - 1))
-  return Math.floor(10 * 1.45 ** 11 * 1.18 ** (level - 12))
+/**
+ * Speed needed to finish `level` (from level to level + 1). Levels come from
+ * Speed: see `levelForSpeed`.
+ */
+export const xpForLevel = (level) => BALANCE.levels.first * BALANCE.levels.growth ** (level - 1)
+
+/** Total Speed at which `level` starts (level 1 at 0). */
+export function speedForLevel(level) {
+  const { first, growth } = BALANCE.levels
+  return level <= 1 ? 0 : (first * (growth ** (level - 1) - 1)) / (growth - 1)
 }
 
-/** "Max Bike Speed" — also the bike's top speed in studs/sec. Lvl 11 -> 40. */
-export const bikeSpeedFor = (level, upgrades = 0) => 10 + 3 * (level - 1) + upgrades
+/** The level a rider with `speed` Total Speed is at. */
+export function levelForSpeed(speed) {
+  const { first, growth } = BALANCE.levels
+  const level = 1 + Math.floor(Math.log(1 + (Math.max(0, speed) * (growth - 1)) / first) / Math.log(growth) + 1e-9)
+  return Math.max(1, level)
+}
+
+/**
+ * "Max Bike Speed": the bike's top speed in studs/sec, from Total Speed. It rises
+ * with the log of Speed so every 10x Speed adds about the same.
+ */
+export function bikeSpeedFor(speed) {
+  const { min, max, maxAtSpeed, knee } = BALANCE.bike
+  const t = Math.log10(1 + Math.max(0, speed) / knee) / Math.log10(1 + maxAtSpeed / knee)
+  return Math.round((min + (max - min) * Math.min(1, t)) * 10) / 10
+}
 
 /** Total jumps per air-time: the ground jump plus (level - 1) mid-air jumps. */
 export const jumpsFor = (level) => Math.max(1, level)
 
-/** Level needed to rebirth (it resets your level to 1). */
-export const REBIRTH_LEVEL = 10
-export const rebirthLevelFor = () => REBIRTH_LEVEL
-/**
- * Rebirths gained by rebirthing at `level`: 1 at level 10, then growing fast, so
- * the higher you climb before rebirthing the more you get (lvl 20 -> 46, lvl 40 -> 243).
- */
-export const rebirthGainFor = (level) => (level < REBIRTH_LEVEL ? 0 : Math.max(1, Math.floor((level - REBIRTH_LEVEL + 1) ** 1.6)))
-/** Each rebirth is a permanent +50% Speed XP. */
-export const rebirthBonus = (rebirths) => rebirths * 0.5
-export const bikeSpeedUpgradeCost = (upgrades) => 5 * (upgrades + 1)
-/** +10% per other player in the lobby, capped at +50%. */
-export const friendBonus = (others) => Math.min(Math.max(others, 0), 5) * 0.1
+/** Total Speed needed for the next rebirth (it resets Speed to 0). */
+export const rebirthSpeedFor = (rebirths) => BALANCE.rebirth.firstSpeed * BALANCE.rebirth.growth ** Math.max(0, rebirths || 0)
+/** Rebirths gained per rebirth. */
+export const REBIRTH_GAIN = BALANCE.rebirth.perRebirth
+/** Permanent Speed-gain bonus from rebirths (0.5 = +50%). */
+export const rebirthBonus = (rebirths) => (rebirths || 0) * BALANCE.rebirth.bonusPerRebirth
+
+/** Bike tune-ups ("Bike Speed" button): each one is +bonus Speed gain. */
+export const TUNE_UP_MAX = BALANCE.tuneUps.max
+export const tuneUpBonus = (count) => Math.min(count || 0, TUNE_UP_MAX) * BALANCE.tuneUps.bonus
+export const tuneUpCost = (count) => Math.round(BALANCE.tuneUps.firstPrice * BALANCE.tuneUps.priceGrowth ** (count || 0))
+
+/** Bonus per other player in the lobby. */
+export const friendBonus = (others) => Math.min(Math.max(others, 0), BALANCE.friends.maxFriends) * BALANCE.friends.perFriend
 
 /* ---------------------------------------------------------------------------
  * Worlds and stages.
  *
- * All of a world's stages sit at the same height, separated by gaps with a
- * deadly floor. `jumps` is the level (= jumps per air-time) needed to get into
- * that stage: for stage 1 it's the wall up from the lobby, for every other
- * stage it's the gap in front of it (see `gapLengthFor` in layout.js). Every
- * stage has a global id (gid): World 1 is 1-10 plus its finish (11), World 2 is
- * 12-21 plus its finish (22).
+ * Each stage is an island across a gap with a deadly river. `speed` is the
+ * Total Speed its gate asks for: the gap is built so that much Speed clears it
+ * and less falls short (see `gapLengthFor` in layout.js). `speed` and `wins`
+ * come from config/balance.ts. Every stage has a global id (gid): World 1 is
+ * 1-10 plus its finish (11), World 2 is 12-21 plus its finish (22).
  * ------------------------------------------------------------------------- */
 
 const W1_STAGES = [
-  { name: 'Starter Stage', theme: 'starter', wins: 1, jumps: 2, color: '#f4f4f4' },
-  { name: 'Forest Stage', theme: 'forest', wins: 3, jumps: 4, color: '#3fd16b' },
-  { name: 'Cloud Stage', theme: 'cloud', wins: 5, jumps: 7, color: '#2f9cf6' },
-  { name: 'Volcano Stage', theme: 'volcano', wins: 10, jumps: 10, color: '#d8302c' },
-  { name: 'Desert Stage', theme: 'desert', wins: 20, jumps: 14, color: '#3fd16b' },
-  { name: 'Ice Stage', theme: 'ice', wins: 40, jumps: 18, color: '#1f7ca8' },
-  { name: 'Candy Stage', theme: 'candy', wins: 75, jumps: 23, color: 'rainbow' },
-  { name: 'Neon Stage', theme: 'neon', wins: 150, jumps: 28, color: '#b13fe0' },
-  { name: 'Space Stage', theme: 'space', wins: 300, jumps: 34, color: '#8fd12f' },
-  { name: 'Rainbow Stage', theme: 'rainbow', wins: 600, jumps: 40, color: '#2f9cf6' },
+  { name: 'Starter Stage', theme: 'starter', color: '#f4f4f4', ...BALANCE.world1.stages[0] },
+  { name: 'Forest Stage', theme: 'forest', color: '#3fd16b', ...BALANCE.world1.stages[1] },
+  { name: 'Cloud Stage', theme: 'cloud', color: '#2f9cf6', ...BALANCE.world1.stages[2] },
+  { name: 'Volcano Stage', theme: 'volcano', color: '#d8302c', ...BALANCE.world1.stages[3] },
+  { name: 'Desert Stage', theme: 'desert', color: '#3fd16b', ...BALANCE.world1.stages[4] },
+  { name: 'Ice Stage', theme: 'ice', color: '#1f7ca8', ...BALANCE.world1.stages[5] },
+  { name: 'Candy Stage', theme: 'candy', color: 'rainbow', ...BALANCE.world1.stages[6] },
+  { name: 'Neon Stage', theme: 'neon', color: '#b13fe0', ...BALANCE.world1.stages[7] },
+  { name: 'Space Stage', theme: 'space', color: '#8fd12f', ...BALANCE.world1.stages[8] },
+  { name: 'Rainbow Stage', theme: 'rainbow', color: '#2f9cf6', ...BALANCE.world1.stages[9] },
 ]
 
 const W2_STAGES = [
-  { name: 'Jungle Stage', theme: 'jungle', wins: 1500, jumps: 42, color: '#2f9e3a' },
-  { name: 'Beach Stage', theme: 'beach', wins: 2500, jumps: 45, color: '#ffcf5a' },
-  { name: 'Toxic Stage', theme: 'toxic', wins: 4000, jumps: 48, color: '#8cff3a' },
-  { name: 'Haunted Stage', theme: 'haunted', wins: 6500, jumps: 51, color: '#7a4dff' },
-  { name: 'Crystal Stage', theme: 'crystal', wins: 10000, jumps: 54, color: '#7ff3ff' },
-  { name: 'Factory Stage', theme: 'factory', wins: 15000, jumps: 57, color: '#9aa3b2' },
-  { name: 'Sakura Stage', theme: 'sakura', wins: 25000, jumps: 60, color: '#ff8fd1' },
-  { name: 'Magma Stage', theme: 'magma', wins: 40000, jumps: 63, color: '#ff5a1f' },
-  { name: 'Galaxy Stage', theme: 'galaxy', wins: 65000, jumps: 66, color: '#9b5cff' },
-  { name: 'Golden Stage', theme: 'golden', wins: 100000, jumps: 70, color: 'rainbow' },
+  { name: 'Jungle Stage', theme: 'jungle', color: '#2f9e3a', ...BALANCE.world2.stages[0] },
+  { name: 'Beach Stage', theme: 'beach', color: '#ffcf5a', ...BALANCE.world2.stages[1] },
+  { name: 'Toxic Stage', theme: 'toxic', color: '#8cff3a', ...BALANCE.world2.stages[2] },
+  { name: 'Haunted Stage', theme: 'haunted', color: '#7a4dff', ...BALANCE.world2.stages[3] },
+  { name: 'Crystal Stage', theme: 'crystal', color: '#7ff3ff', ...BALANCE.world2.stages[4] },
+  { name: 'Factory Stage', theme: 'factory', color: '#9aa3b2', ...BALANCE.world2.stages[5] },
+  { name: 'Sakura Stage', theme: 'sakura', color: '#ff8fd1', ...BALANCE.world2.stages[6] },
+  { name: 'Magma Stage', theme: 'magma', color: '#ff5a1f', ...BALANCE.world2.stages[7] },
+  { name: 'Galaxy Stage', theme: 'galaxy', color: '#9b5cff', ...BALANCE.world2.stages[8] },
+  { name: 'Golden Stage', theme: 'golden', color: 'rainbow', ...BALANCE.world2.stages[9] },
 ]
 
 export const WORLDS = [
@@ -117,7 +140,7 @@ export const WORLDS = [
     name: 'World 1',
     originX: 0,
     stages: W1_STAGES,
-    finish: { name: 'You Escaped!', theme: 'finish', wins: 1000, jumps: 46 },
+    finish: { name: 'You Escaped!', theme: 'finish', ...BALANCE.world1.finish },
     /** Best stage (gid) and rebirths needed before the world opens. */
     unlock: { stage: 0, rebirths: 0 },
     gidOffset: 0,
@@ -127,8 +150,8 @@ export const WORLDS = [
     name: 'World 2',
     originX: 3000,
     stages: W2_STAGES,
-    finish: { name: 'World 2 Escaped!', theme: 'finish', wins: 150000, jumps: 75 },
-    unlock: { stage: 11, rebirths: 10 },
+    finish: { name: 'World 2 Escaped!', theme: 'finish', ...BALANCE.world2.finish },
+    unlock: { stage: 11, rebirths: BALANCE.world2.unlockRebirths },
     gidOffset: 11,
   },
 ]
@@ -151,52 +174,78 @@ export const worldAtX = (x) => (x > WORLDS[1].originX / 2 ? 2 : 1)
  *  shop 'pad'  - cheaper bikes on the cyan pads by the World 1 course entrance
  *  shop 'wins' - the World 1 Wins Shop gallery
  *  shop 'w2'   - the World 2 bike gallery (needs World 2 unlocked)
+ *  shop 'rebirth' - exclusive: given at a rebirth milestone, never sold
  * ------------------------------------------------------------------------- */
 
 export const BIKES = [
-  { id: 'starter', name: 'Starter Bike', mult: 1, price: 0, currency: 'wins', shop: 'free', frame: '#2b2f3a', accent: '#f6d33c', rim: '#f6d33c' },
-  { id: 'angel', name: 'Angel Bike', mult: 1.5, price: 15, currency: 'wins', shop: 'pad', frame: '#f6f2e8', accent: '#ffd76a', rim: '#ffffff', extra: 'wings' },
-  { id: 'dragon', name: 'Dragon Bike', mult: 2, price: 25, currency: 'wins', shop: 'pad', frame: '#3aa14a', accent: '#e0463c', rim: '#1d5e28', extra: 'dragon' },
-  { id: 'six7', name: '67 Bike', mult: 3, price: 40, currency: 'wins', shop: 'pad', frame: '#2f7bff', accent: '#ffffff', rim: '#7fd4ff', extra: 'plate' },
-  { id: 'ufo', name: 'UFO Bike', mult: 5, price: 60, currency: 'wins', shop: 'pad', frame: '#4b5563', accent: '#36f0ff', rim: '#36f0ff', extra: 'ufo', glow: true },
-  { id: 'shark', name: 'Shark Bike', mult: 7, price: 90, currency: 'wins', shop: 'pad', frame: '#5f8fb8', accent: '#ffffff', rim: '#c9e6ff', extra: 'fin' },
-  { id: 'pumpkin', name: 'Pumpkin Bike', mult: 10, price: 130, currency: 'wins', shop: 'pad', frame: '#ff8a1f', accent: '#2f9e3a', rim: '#3b2a1a', extra: 'horns' },
-  { id: 'neon', name: 'Neon Bike', mult: 14, price: 150, currency: 'wins', shop: 'wins', frame: '#ff3df2', accent: '#3dfffa', rim: '#3dfffa', glow: true },
-  { id: 'lava', name: 'Lava Bike', mult: 20, price: 400, currency: 'wins', shop: 'wins', frame: '#2a1a14', accent: '#ff7a1a', rim: '#ff4d00', glow: true, extra: 'flames' },
-  { id: 'frost', name: 'Frost Bike', mult: 28, price: 900, currency: 'wins', shop: 'wins', frame: '#bfefff', accent: '#ffffff', rim: '#6fd2ff', extra: 'crystals' },
-  { id: 'galaxy', name: 'Galaxy Bike', mult: 40, price: 1500, currency: 'wins', shop: 'wins', frame: '#5b2bd9', accent: '#ff9df5', rim: '#b98bff', glow: true, extra: 'stars' },
-  { id: 'candy', name: 'Candy Bike', mult: 55, price: 2500, currency: 'wins', shop: 'wins', frame: '#ff7ac8', accent: '#ffffff', rim: '#7ad8ff', extra: 'stripes' },
-  { id: 'rainbow', name: 'Rainbow Bike', mult: 75, price: 4000, currency: 'wins', shop: 'wins', frame: '#ff4d4d', accent: '#ffffff', rim: '#ffd23f', extra: 'rainbow' },
-  { id: 'golden', name: 'Golden Bike', mult: 110, price: 10000, currency: 'wins', shop: 'wins', frame: '#ffc933', accent: '#fff2b0', rim: '#ffe27a', metal: true, extra: 'crown' },
-  { id: 'diamond', name: 'Diamond Bike', mult: 160, price: 25000, currency: 'wins', shop: 'wins', frame: '#8ff6ff', accent: '#ffffff', rim: '#c9fbff', metal: true, glow: true, extra: 'crystals' },
-  { id: 'crystal', name: 'Crystal Bike', mult: 250, price: 50000, currency: 'wins', shop: 'w2', frame: '#b07bff', accent: '#7ff3ff', rim: '#e3c9ff', glow: true, extra: 'crystals' },
-  { id: 'toxic', name: 'Toxic Bike', mult: 380, price: 100000, currency: 'wins', shop: 'w2', frame: '#2b2f3a', accent: '#8cff3a', rim: '#8cff3a', glow: true, extra: 'fin' },
-  { id: 'phoenix', name: 'Phoenix Bike', mult: 550, price: 250000, currency: 'wins', shop: 'w2', frame: '#ff5a1f', accent: '#ffe14d', rim: '#ffb21f', glow: true, extra: 'flamewings' },
-  { id: 'void', name: 'Void Bike', mult: 800, price: 500000, currency: 'wins', shop: 'w2', frame: '#140b2e', accent: '#b45cff', rim: '#7a2bff', glow: true, extra: 'stars' },
-  { id: 'royal', name: 'Royal Bike', mult: 1200, price: 1_000_000, currency: 'wins', shop: 'w2', frame: '#6b2bd9', accent: '#ffd23a', rim: '#ffd23a', metal: true, extra: 'crown' },
-  { id: 'cosmic', name: 'Cosmic Bike', mult: 2000, price: 2_500_000, currency: 'wins', shop: 'w2', frame: '#1b2a6b', accent: '#ff6ef7', rim: '#2fd0ff', glow: true, extra: 'rainbow' },
+  { id: 'starter', ...BALANCE.bikes.starter, name: 'Starter Bike', rarity: 'Common', currency: 'wins', shop: 'free', frame: '#2b2f3a', accent: '#f6d33c', rim: '#f6d33c' },
+  { id: 'angel', ...BALANCE.bikes.angel, name: 'Angel Bike', rarity: 'Common', currency: 'wins', shop: 'pad', frame: '#f6f2e8', accent: '#ffd76a', rim: '#ffffff', extra: 'wings' },
+  { id: 'dragon', ...BALANCE.bikes.dragon, name: 'Dragon Bike', rarity: 'Common', currency: 'wins', shop: 'pad', frame: '#3aa14a', accent: '#e0463c', rim: '#1d5e28', extra: 'dragon' },
+  { id: 'six7', ...BALANCE.bikes.six7, name: '67 Bike', rarity: 'Uncommon', currency: 'wins', shop: 'pad', frame: '#2f7bff', accent: '#ffffff', rim: '#7fd4ff', extra: 'plate' },
+  { id: 'ufo', ...BALANCE.bikes.ufo, name: 'UFO Bike', rarity: 'Uncommon', currency: 'wins', shop: 'pad', frame: '#4b5563', accent: '#36f0ff', rim: '#36f0ff', extra: 'ufo', glow: true },
+  { id: 'shark', ...BALANCE.bikes.shark, name: 'Shark Bike', rarity: 'Uncommon', currency: 'wins', shop: 'pad', frame: '#5f8fb8', accent: '#ffffff', rim: '#c9e6ff', extra: 'fin' },
+  { id: 'pumpkin', ...BALANCE.bikes.pumpkin, name: 'Pumpkin Bike', rarity: 'Rare', currency: 'wins', shop: 'pad', frame: '#ff8a1f', accent: '#2f9e3a', rim: '#3b2a1a', extra: 'horns' },
+  { id: 'neon', ...BALANCE.bikes.neon, name: 'Neon Bike', rarity: 'Rare', currency: 'wins', shop: 'wins', frame: '#ff3df2', accent: '#3dfffa', rim: '#3dfffa', glow: true },
+  { id: 'lava', ...BALANCE.bikes.lava, name: 'Lava Bike', rarity: 'Rare', currency: 'wins', shop: 'wins', frame: '#2a1a14', accent: '#ff7a1a', rim: '#ff4d00', glow: true, extra: 'flames' },
+  { id: 'frost', ...BALANCE.bikes.frost, name: 'Frost Bike', rarity: 'Epic', currency: 'wins', shop: 'wins', frame: '#bfefff', accent: '#ffffff', rim: '#6fd2ff', extra: 'crystals' },
+  { id: 'galaxy', ...BALANCE.bikes.galaxy, name: 'Galaxy Bike', rarity: 'Epic', currency: 'wins', shop: 'wins', frame: '#5b2bd9', accent: '#ff9df5', rim: '#b98bff', glow: true, extra: 'stars' },
+  { id: 'candy', ...BALANCE.bikes.candy, name: 'Candy Bike', rarity: 'Epic', currency: 'wins', shop: 'wins', frame: '#ff7ac8', accent: '#ffffff', rim: '#7ad8ff', extra: 'stripes' },
+  { id: 'rainbow', ...BALANCE.bikes.rainbow, name: 'Rainbow Bike', rarity: 'Legendary', currency: 'wins', shop: 'wins', frame: '#ff4d4d', accent: '#ffffff', rim: '#ffd23f', extra: 'rainbow' },
+  { id: 'golden', ...BALANCE.bikes.golden, name: 'Golden Bike', rarity: 'Legendary', currency: 'wins', shop: 'wins', frame: '#ffc933', accent: '#fff2b0', rim: '#ffe27a', metal: true, extra: 'crown' },
+  { id: 'diamond', ...BALANCE.bikes.diamond, name: 'Diamond Bike', rarity: 'Legendary', currency: 'wins', shop: 'wins', frame: '#8ff6ff', accent: '#ffffff', rim: '#c9fbff', metal: true, glow: true, extra: 'crystals' },
+  { id: 'reborn', ...BALANCE.bikes.reborn, name: 'Reborn Bike', rarity: 'Epic', currency: 'wins', shop: 'rebirth', milestone: 5, frame: '#ff4f8b', accent: '#ffffff', rim: '#ffd23a', glow: true, extra: 'wings' },
+  { id: 'eclipse', ...BALANCE.bikes.eclipse, name: 'Eclipse Bike', rarity: 'Legendary', currency: 'wins', shop: 'rebirth', milestone: 10, frame: '#1b1030', accent: '#ffb21f', rim: '#ff5a1f', glow: true, extra: 'crown' },
+  { id: 'ascended', ...BALANCE.bikes.ascended, name: 'Ascended Bike', rarity: 'Mythic', currency: 'wins', shop: 'rebirth', milestone: 25, frame: '#fff6d6', accent: '#7ff3ff', rim: '#ffffff', metal: true, glow: true, extra: 'flamewings' },
+  { id: 'crystal', ...BALANCE.bikes.crystal, name: 'Crystal Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#b07bff', accent: '#7ff3ff', rim: '#e3c9ff', glow: true, extra: 'crystals' },
+  { id: 'toxic', ...BALANCE.bikes.toxic, name: 'Toxic Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#2b2f3a', accent: '#8cff3a', rim: '#8cff3a', glow: true, extra: 'fin' },
+  { id: 'phoenix', ...BALANCE.bikes.phoenix, name: 'Phoenix Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#ff5a1f', accent: '#ffe14d', rim: '#ffb21f', glow: true, extra: 'flamewings' },
+  { id: 'void', ...BALANCE.bikes.void, name: 'Void Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#140b2e', accent: '#b45cff', rim: '#7a2bff', glow: true, extra: 'stars' },
+  { id: 'royal', ...BALANCE.bikes.royal, name: 'Royal Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#6b2bd9', accent: '#ffd23a', rim: '#ffd23a', metal: true, extra: 'crown' },
+  { id: 'cosmic', ...BALANCE.bikes.cosmic, name: 'Cosmic Bike', rarity: 'Mythic', currency: 'wins', shop: 'w2', frame: '#1b2a6b', accent: '#ff6ef7', rim: '#2fd0ff', glow: true, extra: 'rainbow' },
 ]
 
 /** `bonus` adds to the speed multiplier while equipped. */
 export const TRAILS = [
-  { id: 'none', name: 'No Trail', bonus: 0, price: 0, colors: [] },
-  { id: 'red', name: 'Red Streak', bonus: 0.05, price: 10, colors: ['#ff3b3b', '#ffb03b'] },
-  { id: 'ocean', name: 'Ocean Wave', bonus: 0.1, price: 30, colors: ['#3fd2ff', '#2f5bff'] },
-  { id: 'toxic', name: 'Toxic Slime', bonus: 0.15, price: 75, colors: ['#c6ff3b', '#2fff7a'] },
-  { id: 'fire', name: 'Fire Blaze', bonus: 0.25, price: 200, colors: ['#fff07a', '#ff4d00'], glow: true },
-  { id: 'galaxy', name: 'Galaxy Dust', bonus: 0.4, price: 600, colors: ['#ff6ef7', '#7b3bff', '#2fd0ff'], glow: true },
-  { id: 'rainbow', name: 'Rainbow Road', bonus: 0.6, price: 1500, colors: ['#ff3b3b', '#ffb03b', '#fff03b', '#3bff6e', '#3bb5ff', '#a03bff'], glow: true },
+  { id: 'none', ...BALANCE.trails.none, name: 'No Trail', rarity: 'Common', colors: [] },
+  { id: 'red', ...BALANCE.trails.red, name: 'Red Streak', rarity: 'Common', colors: ['#ff3b3b', '#ffb03b'] },
+  { id: 'mint', ...BALANCE.trails.mint, name: 'Mint Breeze', rarity: 'Common', colors: ['#b6ffd9', '#3fe0a0'] },
+  { id: 'bubblegum', ...BALANCE.trails.bubblegum, name: 'Bubblegum', rarity: 'Common', colors: ['#ffb3e0', '#ff6ec4'] },
+  { id: 'ocean', ...BALANCE.trails.ocean, name: 'Ocean Wave', rarity: 'Common', colors: ['#3fd2ff', '#2f5bff'] },
+  { id: 'sunset', ...BALANCE.trails.sunset, name: 'Sunset Glow', rarity: 'Uncommon', colors: ['#ffd23a', '#ff7a2f', '#ff3f78'] },
+  { id: 'toxic', ...BALANCE.trails.toxic, name: 'Toxic Slime', rarity: 'Uncommon', colors: ['#c6ff3b', '#2fff7a'] },
+  { id: 'ice', ...BALANCE.trails.ice, name: 'Frost Trail', rarity: 'Uncommon', colors: ['#ffffff', '#9fe8ff', '#4fb4ff'] },
+  { id: 'fire', ...BALANCE.trails.fire, name: 'Fire Blaze', rarity: 'Rare', colors: ['#fff07a', '#ff4d00'], glow: true },
+  { id: 'shadow', ...BALANCE.trails.shadow, name: 'Shadow Smoke', rarity: 'Rare', colors: ['#6b4fd8', '#2a1f4d', '#15151d'] },
+  { id: 'lightning', ...BALANCE.trails.lightning, name: 'Lightning', rarity: 'Rare', colors: ['#ffffff', '#fff47a', '#7fd4ff'], glow: true },
+  { id: 'neon', ...BALANCE.trails.neon, name: 'Neon Pulse', rarity: 'Epic', colors: ['#3dfffa', '#ff3df2'], glow: true },
+  { id: 'galaxy', ...BALANCE.trails.galaxy, name: 'Galaxy Dust', rarity: 'Epic', colors: ['#ff6ef7', '#7b3bff', '#2fd0ff'], glow: true },
+  { id: 'gold', ...BALANCE.trails.gold, name: 'Golden Dust', rarity: 'Legendary', colors: ['#fff3a0', '#ffc933', '#ff9f1f'], glow: true },
+  { id: 'rainbow', ...BALANCE.trails.rainbow, name: 'Rainbow Road', rarity: 'Legendary', colors: ['#ff3b3b', '#ffb03b', '#fff03b', '#3bff6e', '#3bb5ff', '#a03bff'], glow: true },
+  { id: 'cosmic', ...BALANCE.trails.cosmic, name: 'Cosmic Comet', rarity: 'Mythic', colors: ['#ffffff', '#ff6ef7', '#7b3bff', '#2fd0ff', '#ffffff'], glow: true },
 ]
 
 /** `winsMult` multiplies wins from Return pads while equipped. */
 export const AURAS = [
-  { id: 'none', name: 'No Aura', winsMult: 1, price: 0, currency: 'wins', color: '#ffffff' },
-  { id: 'sparkle', name: 'Sparkle Aura', winsMult: 1.25, price: 25, currency: 'wins', color: '#fff27a' },
-  { id: 'frost', name: 'Frost Aura', winsMult: 1.5, price: 120, currency: 'wins', color: '#8ee8ff' },
-  { id: 'flame', name: 'Flame Aura', winsMult: 2, price: 400, currency: 'wins', color: '#ff7a2f' },
-  { id: 'shadow', name: 'Shadow Aura', winsMult: 3, price: 1200, currency: 'wins', color: '#9b5cff' },
-  { id: 'unchained', name: 'Unchained Aura', winsMult: 10, price: 5000, currency: 'wins', color: '#ff2f4d' },
+  { id: 'none', ...BALANCE.auras.none, name: 'No Aura', rarity: 'Common', currency: 'wins', color: '#ffffff' },
+  { id: 'bubble', ...BALANCE.auras.bubble, name: 'Bubble Aura', rarity: 'Common', currency: 'wins', color: '#bfe9ff' },
+  { id: 'leaf', ...BALANCE.auras.leaf, name: 'Leaf Aura', rarity: 'Common', currency: 'wins', color: '#7ddc5a' },
+  { id: 'sparkle', ...BALANCE.auras.sparkle, name: 'Sparkle Aura', rarity: 'Common', currency: 'wins', color: '#fff27a' },
+  { id: 'sun', ...BALANCE.auras.sun, name: 'Sunny Aura', rarity: 'Common', currency: 'wins', color: '#ffcf3a' },
+  { id: 'ocean', ...BALANCE.auras.ocean, name: 'Ocean Aura', rarity: 'Uncommon', currency: 'wins', color: '#2fb8ff' },
+  { id: 'frost', ...BALANCE.auras.frost, name: 'Frost Aura', rarity: 'Uncommon', currency: 'wins', color: '#8ee8ff' },
+  { id: 'toxic', ...BALANCE.auras.toxic, name: 'Toxic Aura', rarity: 'Uncommon', currency: 'wins', color: '#8cff3a' },
+  { id: 'heart', ...BALANCE.auras.heart, name: 'Heart Aura', rarity: 'Rare', currency: 'wins', color: '#ff6eb4' },
+  { id: 'flame', ...BALANCE.auras.flame, name: 'Flame Aura', rarity: 'Rare', currency: 'wins', color: '#ff7a2f' },
+  { id: 'storm', ...BALANCE.auras.storm, name: 'Storm Aura', rarity: 'Rare', currency: 'wins', color: '#7fa8ff' },
+  { id: 'galaxy', ...BALANCE.auras.galaxy, name: 'Galaxy Aura', rarity: 'Epic', currency: 'wins', color: '#b45cff' },
+  { id: 'shadow', ...BALANCE.auras.shadow, name: 'Shadow Aura', rarity: 'Epic', currency: 'wins', color: '#9b5cff' },
+  { id: 'rainbow', ...BALANCE.auras.rainbow, name: 'Rainbow Aura', rarity: 'Legendary', currency: 'wins', color: '#ff8ad8' },
+  { id: 'crown', ...BALANCE.auras.crown, name: 'Royal Aura', rarity: 'Legendary', currency: 'wins', color: '#ffd23a' },
+  { id: 'unchained', ...BALANCE.auras.unchained, name: 'Unchained Aura', rarity: 'Mythic', currency: 'wins', color: '#ff2f4d' },
 ]
+
+/** Rarity order, lowest first (bikes, trails, auras and items share it). */
+export const RARITIES = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Mythic']
 
 export const RARITY_COLORS = {
   Common: '#9aa6b2',
@@ -212,30 +261,30 @@ export const RARITY_COLORS = {
  * also need World 2 open. Laid out in the lobbies by `buildLayout()`.
  */
 export const TRAIN_PADS = [
-  { id: 'starter', label: 'STARTER', mult: 1, world: 1, color: '#b8c0ca' },
-  { id: 'pink', label: 'PINK', mult: 2.5, world: 1, rebirths: 5, color: '#ff8fd1' },
-  { id: 'mint', label: 'MINT', mult: 3.5, world: 1, rebirths: 20, color: '#7dffc8' },
-  { id: 'purple', label: 'PURPLE', mult: 5, world: 1, rebirths: 50, color: '#a46bff' },
-  { id: 'rocks', label: 'ROCKS', mult: 8, world: 1, rebirths: 120, color: '#9a8a76' },
-  { id: 'quartz', label: 'QUARTZ', mult: 12, world: 1, rebirths: 250, color: '#efe2ff' },
-  { id: 'sky', label: 'SKY', mult: 18, world: 1, rebirths: 500, color: '#6fd0ff' },
-  { id: 'cotton', label: 'COTTON CANDY', mult: 25, world: 1, rebirths: 900, color: '#ffc2ee' },
-  { id: 'lava', label: 'LAVA', mult: 35, world: 1, rebirths: 1500, color: '#ff6a2f' },
-  { id: 'peridot', label: 'PERIDOT', mult: 50, world: 1, rebirths: 2500, color: '#b7e34a' },
-  { id: 'emerald', label: 'EMERALD', mult: 75, world: 1, rebirths: 4000, color: '#2fd27a' },
-  { id: 'ruby', label: 'RUBY', mult: 100, world: 1, rebirths: 6000, color: '#ff3b5c' },
-  { id: 'gold', label: 'GOLD', mult: 150, world: 1, wins: 2500, color: '#ffcc33' },
-  { id: 'diamond', label: 'DIAMOND', mult: 300, world: 1, wins: 6000, color: '#7ff3ff' },
-  { id: 'poison', label: 'POISON', mult: 600, world: 1, wins: 15000, color: '#8cff3a' },
-  { id: 'admin', label: 'ADMIN', mult: 1000, world: 1, wins: 40000, color: '#ff3a3a' },
-  { id: 'crystal', label: 'CRYSTAL', mult: 800, world: 2, color: '#c9a2ff' },
-  { id: 'nebula', label: 'NEBULA', mult: 1200, world: 2, rebirths: 12000, color: '#7a5cff' },
-  { id: 'magma', label: 'MAGMA', mult: 2000, world: 2, rebirths: 16000, color: '#ff5a1f' },
-  { id: 'frostbite', label: 'FROSTBITE', mult: 3000, world: 2, rebirths: 22000, color: '#9fe8ff' },
-  { id: 'void', label: 'VOID', mult: 5000, world: 2, rebirths: 30000, color: '#3b1d6e' },
-  { id: 'cosmic', label: 'COSMIC', mult: 8000, world: 2, rebirths: 45000, color: '#ff6ef7' },
-  { id: 'celestial', label: 'CELESTIAL', mult: 12000, world: 2, wins: 400000, color: '#fff3a0' },
-  { id: 'omega', label: 'OMEGA', mult: 25000, world: 2, wins: 1200000, color: '#ffffff' },
+  { id: 'starter', ...BALANCE.treadmills.starter, label: 'STARTER', world: 1, color: '#b8c0ca' },
+  { id: 'pink', ...BALANCE.treadmills.pink, label: 'PINK', world: 1, color: '#ff8fd1' },
+  { id: 'mint', ...BALANCE.treadmills.mint, label: 'MINT', world: 1, color: '#7dffc8' },
+  { id: 'purple', ...BALANCE.treadmills.purple, label: 'PURPLE', world: 1, color: '#a46bff' },
+  { id: 'rocks', ...BALANCE.treadmills.rocks, label: 'ROCKS', world: 1, color: '#9a8a76' },
+  { id: 'quartz', ...BALANCE.treadmills.quartz, label: 'QUARTZ', world: 1, color: '#efe2ff' },
+  { id: 'sky', ...BALANCE.treadmills.sky, label: 'SKY', world: 1, color: '#6fd0ff' },
+  { id: 'cotton', ...BALANCE.treadmills.cotton, label: 'COTTON CANDY', world: 1, color: '#ffc2ee' },
+  { id: 'lava', ...BALANCE.treadmills.lava, label: 'LAVA', world: 1, color: '#ff6a2f' },
+  { id: 'peridot', ...BALANCE.treadmills.peridot, label: 'PERIDOT', world: 1, color: '#b7e34a' },
+  { id: 'emerald', ...BALANCE.treadmills.emerald, label: 'EMERALD', world: 1, color: '#2fd27a' },
+  { id: 'ruby', ...BALANCE.treadmills.ruby, label: 'RUBY', world: 1, color: '#ff3b5c' },
+  { id: 'gold', ...BALANCE.treadmills.gold, label: 'GOLD', world: 1, color: '#ffcc33' },
+  { id: 'diamond', ...BALANCE.treadmills.diamond, label: 'DIAMOND', world: 1, color: '#7ff3ff' },
+  { id: 'poison', ...BALANCE.treadmills.poison, label: 'POISON', world: 1, color: '#8cff3a' },
+  { id: 'admin', ...BALANCE.treadmills.admin, label: 'ADMIN', world: 1, color: '#ff3a3a' },
+  { id: 'crystal', ...BALANCE.treadmills.crystal, label: 'CRYSTAL', world: 2, color: '#c9a2ff' },
+  { id: 'nebula', ...BALANCE.treadmills.nebula, label: 'NEBULA', world: 2, color: '#7a5cff' },
+  { id: 'magma', ...BALANCE.treadmills.magma, label: 'MAGMA', world: 2, color: '#ff5a1f' },
+  { id: 'frostbite', ...BALANCE.treadmills.frostbite, label: 'FROSTBITE', world: 2, color: '#9fe8ff' },
+  { id: 'void', ...BALANCE.treadmills.void, label: 'VOID', world: 2, color: '#3b1d6e' },
+  { id: 'cosmic', ...BALANCE.treadmills.cosmic, label: 'COSMIC', world: 2, color: '#ff6ef7' },
+  { id: 'celestial', ...BALANCE.treadmills.celestial, label: 'CELESTIAL', world: 2, color: '#fff3a0' },
+  { id: 'omega', ...BALANCE.treadmills.omega, label: 'OMEGA', world: 2, color: '#ffffff' },
 ]
 
 /**
@@ -243,15 +292,15 @@ export const TRAIN_PADS = [
  * for more. The shop restocks every 5 minutes (see `shopOffer`).
  */
 export const ITEMS = [
-  { id: 'bell', name: 'Rusty Bell', rarity: 'Common', price: 10, bonus: 0.02, stock: 5, icon: '🔔' },
-  { id: 'pump', name: 'Bike Pump', rarity: 'Common', price: 20, bonus: 0.04, stock: 5, icon: '🎈' },
-  { id: 'bottle', name: 'Water Bottle', rarity: 'Common', price: 45, bonus: 0.08, stock: 5, icon: '🧴' },
-  { id: 'chain', name: 'Chain', rarity: 'Common', price: 65, bonus: 0.1, stock: 5, icon: '⛓️' },
-  { id: 'helmet', name: 'Helmet', rarity: 'Uncommon', price: 150, bonus: 0.18, stock: 3, icon: '⛑️' },
-  { id: 'gloves', name: 'Grip Gloves', rarity: 'Uncommon', price: 250, bonus: 0.25, stock: 3, icon: '🧤' },
-  { id: 'pedals', name: 'Turbo Pedals', rarity: 'Rare', price: 600, bonus: 0.45, stock: 2, icon: '⚙️' },
-  { id: 'nitro', name: 'Nitro Tank', rarity: 'Epic', price: 1500, bonus: 0.8, stock: 1, icon: '🚀' },
-  { id: 'wings', name: 'Golden Wings', rarity: 'Legendary', price: 5000, bonus: 1.5, stock: 1, icon: '🪽' },
+  { id: 'bell', ...BALANCE.items.bell, name: 'Rusty Bell', rarity: 'Common', stock: 5, icon: '🔔' },
+  { id: 'pump', ...BALANCE.items.pump, name: 'Bike Pump', rarity: 'Common', stock: 5, icon: '🎈' },
+  { id: 'bottle', ...BALANCE.items.bottle, name: 'Water Bottle', rarity: 'Common', stock: 5, icon: '🧴' },
+  { id: 'chain', ...BALANCE.items.chain, name: 'Chain', rarity: 'Common', stock: 5, icon: '⛓️' },
+  { id: 'helmet', ...BALANCE.items.helmet, name: 'Helmet', rarity: 'Uncommon', stock: 3, icon: '⛑️' },
+  { id: 'gloves', ...BALANCE.items.gloves, name: 'Grip Gloves', rarity: 'Uncommon', stock: 3, icon: '🧤' },
+  { id: 'pedals', ...BALANCE.items.pedals, name: 'Turbo Pedals', rarity: 'Rare', stock: 2, icon: '⚙️' },
+  { id: 'nitro', ...BALANCE.items.nitro, name: 'Nitro Tank', rarity: 'Epic', stock: 1, icon: '🚀' },
+  { id: 'wings', ...BALANCE.items.wings, name: 'Golden Wings', rarity: 'Legendary', stock: 1, icon: '🪽' },
 ]
 
 const RARITY_WEIGHT = { Common: 60, Uncommon: 25, Rare: 10, Epic: 4, Legendary: 1 }
@@ -288,13 +337,14 @@ export function shopOffer(cycle, rerolls = 0) {
 }
 
 /** Passes and speed packs, all bought with Wins. */
+const { products } = BALANCE
 export const PRODUCTS = {
-  pass2xSpeed: { name: '2x Speed', price: 50 },
-  pass2xWins: { name: '2x Wins', price: 120 },
-  speed100: { name: '+100 Speed', price: 2, speed: 100 },
-  speed1k: { name: '+1000 Speed', price: 10, speed: 1000 },
-  speed10k: { name: '+10k Speed', price: 60, speed: 10_000 },
-  speed100k: { name: '+100k Speed', price: 300, speed: 100_000 },
+  pass2xSpeed: { name: '2x Speed', price: products.pass2xSpeed },
+  pass2xWins: { name: '2x Wins', price: products.pass2xWins },
+  speed100: { name: `+${products.speed100.speed} Speed`, ...products.speed100 },
+  speed1k: { name: `+${products.speed1k.speed} Speed`, ...products.speed1k },
+  speed10k: { name: `+${products.speed10k.speed / 1000}k Speed`, ...products.speed10k },
+  speed100k: { name: `+${products.speed100k.speed / 1000}k Speed`, ...products.speed100k },
 }
 
 export const CODES = {
@@ -309,12 +359,13 @@ export const CODES = {
  * Quest lines. Progress is `counters[counter] - base` for the current tier, except
  * `absolute` quests which compare the counter directly.
  */
+const Q = BALANCE.quests
 export const QUESTS = [
-  { id: 'speed', title: 'Gain {n} Speed', icon: '⚡', counter: 'gained', target: (t) => 150 * 3 ** t, reward: (t) => ({ wins: 3 + 2 * t }) },
-  { id: 'tricks', title: 'Pull off {n} Tricks', icon: '🤸', counter: 'tricks', target: (t) => 25 * 2 ** t, reward: (t) => ({ wins: 3 + 3 * t }) },
-  { id: 'wins', title: 'Earn {n} Wins', icon: '🏆', counter: 'wins', target: (t) => 5 * 3 ** t, reward: (t) => ({ speed: 200 * 3 ** t }) },
-  { id: 'jumps', title: 'Jump {n} Times', icon: '⏫', counter: 'jumps', target: (t) => 40 * 2 ** t, reward: (t) => ({ wins: 2 + t }) },
-  { id: 'stage', title: 'Reach Stage {n}', icon: '🚩', counter: 'bestStage', absolute: true, target: (t) => t + 2, max: 22, reward: (t) => ({ wins: 5 + 3 * t }) },
+  { id: 'speed', title: 'Gain {n} Speed', icon: '⚡', counter: 'gained', target: (t) => Q.speed.target * Q.speed.growth ** t, reward: (t) => ({ wins: Q.speed.winsBase + Q.speed.winsStep * t }) },
+  { id: 'tricks', title: 'Pull off {n} Tricks', icon: '🤸', counter: 'tricks', target: (t) => Q.tricks.target * Q.tricks.growth ** t, reward: (t) => ({ wins: Q.tricks.winsBase + Q.tricks.winsStep * t }) },
+  { id: 'wins', title: 'Earn {n} Wins', icon: '🏆', counter: 'wins', target: (t) => Q.wins.target * Q.wins.growth ** t, reward: (t) => ({ speed: Math.round(Q.wins.speedBase * Q.wins.speedGrowth ** t) }) },
+  { id: 'jumps', title: 'Jump {n} Times', icon: '⏫', counter: 'jumps', target: (t) => Q.jumps.target * Q.jumps.growth ** t, reward: (t) => ({ wins: Q.jumps.winsBase + Q.jumps.winsStep * t }) },
+  { id: 'stage', title: 'Reach Stage {n}', icon: '🚩', counter: 'bestStage', absolute: true, target: (t) => t + 2, max: 22, reward: (t) => ({ wins: Q.stage.winsBase + Q.stage.winsStep * t }) },
 ]
 
 /* ---------------------------------------------------------------------------
@@ -335,6 +386,38 @@ export function itemBonus(itemsCsv) {
   return parseList(itemsCsv).reduce((sum, id) => sum + (ITEM_BY_ID[id]?.bonus ?? 0), 0)
 }
 
+/** Collectibles: every trail and aura except "none". */
+export const COLLECTIBLES = [...TRAILS.filter((t) => t.id !== 'none').map((t) => `trail:${t.id}`), ...AURAS.filter((a) => a.id !== 'none').map((a) => `aura:${a.id}`)]
+
+/** How many trails and auras a player has collected. */
+export function collectionCount(player) {
+  const owned = new Set(parseList(player?.owned))
+  return COLLECTIBLES.filter((key) => owned.has(key)).length
+}
+
+/** The best speed multiplier among the bikes a player owns. */
+export function bestOwnedMult(player) {
+  const owned = new Set(parseList(player?.owned))
+  return BIKES.filter((b) => b.id === 'starter' || owned.has(`bike:${b.id}`)).reduce((max, b) => Math.max(max, b.mult), 1)
+}
+
+/** The next bike worth saving for: the cheapest one faster than the best you own. */
+export function nextBikeFor(player) {
+  const best = bestOwnedMult(player)
+  return BIKES.filter((b) => b.mult > best && b.price > 0 && bikeAvailable(b, player)).sort((a, b) => a.price - b.price)[0] ?? null
+}
+
+/** "+40%" style: how much faster `bike` is than the best owned (0 when not faster). */
+export const fasterThanBest = (bike, player) => Math.max(0, Math.round((bike.mult / bestOwnedMult(player) - 1) * 100))
+
+/** "+40% faster" for small gaps, "12x faster" once it's 10x or more. */
+export function fasterLabel(bike, player) {
+  const pct = fasterThanBest(bike, player)
+  if (pct <= 0) return ''
+  const times = bike.mult / bestOwnedMult(player)
+  return times >= 10 ? `${formatNumber(Math.round(times))}x faster` : `+${formatNumber(pct)}% faster`
+}
+
 /** Whether a player can use a treadmill. */
 export function padUnlocked(pad, player) {
   if (!pad) return false
@@ -343,13 +426,13 @@ export function padUnlocked(pad, player) {
   return (player.rebirths ?? 0) >= (pad.rebirths ?? 0)
 }
 
-/** Whether a bike can be bought (World 2 bikes need World 2 open). */
-export const bikeAvailable = (bike, player) => bike.shop !== 'w2' || worldUnlocked(2, player)
+/** Whether a bike can be bought (World 2 bikes need World 2 open; milestone bikes are never sold). */
+export const bikeAvailable = (bike, player) => bike.shop !== 'rebirth' && (bike.shop !== 'w2' || worldUnlocked(2, player))
 
 /** Every multiplier that applies to one speed tick, split out for the UI. */
 export function speedBreakdown(player, { padMult = 1, others = 0 } = {}) {
   const bike = BIKE_BY_ID[player.bike]?.mult ?? 1
-  const extras = (TRAIL_BY_ID[player.trail]?.bonus ?? 0) + itemBonus(player.items)
+  const extras = (TRAIL_BY_ID[player.trail]?.bonus ?? 0) + itemBonus(player.items) + tuneUpBonus(player.bikeUpg)
   const rebirth = 1 + rebirthBonus(player.rebirths ?? 0)
   const friends = 1 + friendBonus(others)
   const pass = player.pass2xSpeed ? 2 : 1
@@ -370,8 +453,168 @@ export function winsMultiplier(player, { double = false } = {}) {
 }
 
 /** Wins you need to be holding to use the purple 2x Wins pads (the 2x Wins pass skips this). */
-export const DOUBLE_PAD_WINS = 200
+export const DOUBLE_PAD_WINS = BALANCE.doublePadWins
 export const canUseDoublePad = (player) => Boolean(player?.pass2xWins) || (player?.wins ?? 0) >= DOUBLE_PAD_WINS
+
+/* ---------------------------------------------------------------------------
+ * Daily login streak
+ * ------------------------------------------------------------------------- */
+
+const DAY_MS = 24 * 60 * 60_000
+export const DAILY_STREAK = BALANCE.rewards.daily.streak
+export const STREAK_DAYS = DAILY_STREAK.length
+
+/** Whether the streak was broken (more than `graceHours` since the last claim). */
+export function streakBroken(player, now = Date.now()) {
+  if (!player?.dailyAt) return false
+  const lastClaim = player.dailyAt - DAILY_COOLDOWN_MS
+  return now - lastClaim > BALANCE.rewards.daily.graceHours * 3_600_000
+}
+
+/** The streak day (1-7) the next claim pays. */
+export function streakDayFor(player, now = Date.now()) {
+  if (streakBroken(player, now)) return 1
+  return ((player?.dailyStreak || 0) % STREAK_DAYS) + 1
+}
+
+/** Wins for streak `day` (1-7), grown by the player's best stage. */
+export const streakWinsFor = (day, player) =>
+  Math.round(DAILY_STREAK[day - 1] * (1 + BALANCE.rewards.daily.perStage * (player?.bestStage || 0)))
+
+/* ---------------------------------------------------------------------------
+ * Daily quests: three per player per UTC day, sized to their progress
+ * ------------------------------------------------------------------------- */
+
+export const dayNumber = (now = Date.now()) => Math.floor(now / DAY_MS)
+export const nextDayAt = (now = Date.now()) => (dayNumber(now) + 1) * DAY_MS
+
+/** Rounds to a friendly number (2 significant digits): 1234 -> 1200. */
+function niceRound(n) {
+  if (n < 10) return Math.max(1, Math.round(n))
+  const p = 10 ** (Math.floor(Math.log10(n)) - 1)
+  return Math.round(n / p) * p
+}
+
+/** Text for a daily quest (`stage` quests name the stage). */
+export function dailyQuestTitle(quest) {
+  switch (quest.kind) {
+    case 'jumps':
+      return `Clear ${formatNumber(quest.target)} jumps`
+    case 'tricks':
+      return `Pull off ${formatNumber(quest.target)} tricks`
+    case 'wins':
+      return `Earn ${formatNumber(quest.target)} Wins from stage pads`
+    case 'speed':
+      return `Gain ${formatNumber(quest.target)} Speed`
+    case 'train':
+      return `Train ${formatNumber(quest.target)} minutes on treadmills`
+    case 'stage':
+      return `Finish the ${quest.stageName}`
+    default:
+      return 'Daily quest'
+  }
+}
+
+export const DAILY_QUEST_ICONS = { jumps: '⏫', tricks: '🤸', wins: '🏆', speed: '⚡', train: '🏋️', stage: '🚩' }
+/** Lifetime counter each kind reads (`stage` quests are marked done on arrival instead). */
+export const DAILY_QUEST_COUNTERS = { jumps: 'jumps', tricks: 'tricks', wins: 'wins', speed: 'gained', train: 'train' }
+
+/**
+ * Picks today's three quests for a player: one riding quest, one stage, one
+ * earning quest, seeded by the day and uid so it's stable all day.
+ * `stages` is the layout's stage list (layout.js passes it in).
+ */
+export function rollDailyQuests(player, uid, day, stages) {
+  const Q = BALANCE.dailyQuests
+  let seed = day * 2654435761
+  for (const ch of String(uid)) seed = (Math.imul(seed ^ ch.charCodeAt(0), 16777619) + 7) >>> 0
+  const rng = mulberry32(seed)
+  const pick = (list) => list[Math.floor(rng() * list.length)]
+  const best = player.bestStage || 0
+  const reward = { wins: Q.winsBase + Q.winsPerStage * best }
+
+  // A stage the player has reached before (at least the Forest Stage), one below their best.
+  const targetGid = Math.max(2, best - 1)
+  const stage = stages.find((st) => st.gid === targetGid) ?? stages[1]
+  const bestWins = (stages.find((st) => st.gid === Math.max(1, best)) ?? stages[0]).wins
+
+  const ride = pick(['jumps', 'tricks'])
+  const earn = pick(['wins', 'speed', 'train'])
+  const quests = []
+  if (ride === 'jumps') quests.push({ kind: 'jumps', target: niceRound(Q.jumps + 2 * best) })
+  else quests.push({ kind: 'tricks', target: niceRound(Q.tricks + 2 * best) })
+  quests.push({ kind: 'stage', target: 1, gid: stage.gid, stageName: stage.name })
+  if (earn === 'wins') quests.push({ kind: 'wins', target: niceRound(Math.max(10, bestWins * Q.winsRuns)) })
+  else if (earn === 'speed') quests.push({ kind: 'speed', target: niceRound(rebirthSpeedFor(player.rebirths || 0) * Q.speedShare) })
+  else quests.push({ kind: 'train', target: Q.trainMinutes })
+  return quests.map((q) => ({ ...q, reward, base: 0, done: false, claimed: false }))
+}
+
+/** A player's daily quests `{ day, quests }` (stored as JSON). */
+export function parseDaily(text) {
+  try {
+    const value = JSON.parse(text || '{}')
+    return value && Array.isArray(value.quests) ? value : { day: 0, quests: [] }
+  } catch {
+    return { day: 0, quests: [] }
+  }
+}
+
+/** Progress (0..target) of a daily quest, from the player's lifetime counters. */
+export function dailyQuestProgress(quest, counters) {
+  if (quest.kind === 'stage') return quest.done ? 1 : 0
+  const value = counters?.[DAILY_QUEST_COUNTERS[quest.kind]] || 0
+  // Treadmill time is counted in seconds; the quest is in minutes.
+  const amount = quest.kind === 'train' ? (value - quest.base) / 60 : value - quest.base
+  return Math.max(0, Math.min(quest.target, amount))
+}
+
+/* ---------------------------------------------------------------------------
+ * Rebirth milestones and preview
+ * ------------------------------------------------------------------------- */
+
+/** Milestone bikes, lowest first: [{ at, bike }]. */
+export const REBIRTH_MILESTONES = Object.entries(BALANCE.rebirth.milestones)
+  .map(([at, id]) => ({ at: Number(at), bike: BIKE_BY_ID[id] }))
+  .sort((a, b) => a.at - b.at)
+
+/** What the next rebirth gives: bonus before/after, treadmills it opens, milestone bike. */
+export function rebirthPreview(player) {
+  const from = player.rebirths || 0
+  const to = from + REBIRTH_GAIN
+  return {
+    to,
+    bonusFrom: rebirthBonus(from),
+    bonusTo: rebirthBonus(to),
+    treadmills: TRAIN_PADS.filter((pad) => pad.rebirths && pad.rebirths > from && pad.rebirths <= to),
+    milestone: REBIRTH_MILESTONES.find((m) => m.at > from && m.at <= to) ?? null,
+    nextMilestone: REBIRTH_MILESTONES.find((m) => m.at > to) ?? null,
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Offline earnings
+ * ------------------------------------------------------------------------- */
+
+/** The best treadmill a player can use (World 2's only once it's open). */
+export function bestTreadmillFor(player) {
+  return TRAIN_PADS.filter((pad) => padUnlocked(pad, player)).sort((a, b) => b.mult - a.mult)[0] ?? TRAIN_PADS[0]
+}
+
+/**
+ * Speed earned while away for `awayMs`: the best treadmill at reduced power,
+ * capped by time and by a share of the next rebirth. Null when too short.
+ */
+export function offlineEarnings(player, awayMs) {
+  const O = BALANCE.offline
+  if (!(awayMs >= O.minMinutes * 60_000)) return null
+  const pad = bestTreadmillFor(player)
+  const seconds = Math.min(awayMs, O.maxHours * 3_600_000) / 1000
+  const perSecond = BALANCE.speed.perTick * speedBreakdown(player, { padMult: pad.mult }).total * (1000 / BALANCE.speed.tickMs) * O.efficiency
+  const speed = Math.floor(Math.min(perSecond * seconds, rebirthSpeedFor(player.rebirths || 0) * O.maxShareOfRebirth))
+  if (speed < 1) return null
+  return { speed, minutes: Math.round(awayMs / 60_000), countedMinutes: Math.round(seconds / 60), pad: pad.label, padMult: pad.mult }
+}
 
 /** Rounds a gain to two decimals so "+1.25" style numbers stay tidy. */
 export const roundGain = (n) => Math.round(n * 100) / 100
@@ -392,6 +635,24 @@ export function formatNumber(value) {
   }
   const digits = n >= 100 ? 0 : n >= 10 ? 1 : 2
   return sign + String(parseFloat(n.toFixed(digits))) + units[unit]
+}
+
+/** A player's stage records `{ [gid]: best ms }` (stored as JSON). */
+export function parseRecords(text) {
+  try {
+    const value = JSON.parse(text || '{}')
+    return value && typeof value === 'object' ? value : {}
+  } catch {
+    return {}
+  }
+}
+
+/** "0:23.4" style race time. */
+export function formatRaceTime(ms) {
+  const tenths = Math.max(0, Math.floor(ms / 100))
+  const m = Math.floor(tenths / 600)
+  const s = Math.floor((tenths % 600) / 10)
+  return `${m}:${String(s).padStart(2, '0')}.${tenths % 10}`
 }
 
 /** "4:05" style countdown. */
